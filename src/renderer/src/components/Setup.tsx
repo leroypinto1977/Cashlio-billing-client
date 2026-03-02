@@ -1,35 +1,55 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { Server, Settings, CheckCircle, AlertTriangle } from 'lucide-react'
+import { Server, Settings, CheckCircle, AlertTriangle, Monitor } from 'lucide-react'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from './ui/card'
+import { Input } from './ui/input'
+import { Label } from './ui/label'
+import { Button } from './ui/button'
+import { Alert, AlertDescription, AlertTitle } from './ui/alert'
 
 export default function Setup() {
+  const [step, setStep] = useState(0) // 0: Splash, 1: Setup
   const [ipAddress, setIpAddress] = useState('')
-  const [port, setPort] = useState('5000')
+  const [port, setPort] = useState(
+    (import.meta.env.VITE_DEFAULT_SERVER_PORT as string) || '52001'
+  )
+  const [terminalName, setTerminalName] = useState('')
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const navigate = useNavigate()
 
+  // Splash Screen Timer
+  React.useEffect(() => {
+    if (step === 0) {
+      const timer = setTimeout(() => {
+        setStep(1)
+      }, 3000)
+      return () => clearTimeout(timer)
+    }
+  }, [step])
+
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!ipAddress) return
+    if (!ipAddress || !terminalName) return
 
     setStatus('loading')
     setErrorMessage('')
 
     try {
-      const macAddress = '00:1A:2B:3C:4D:5E' // Mock MAC address
+      const macAddress: string = await window.electron.ipcRenderer.invoke('get-mac-address')
       const serverUrl = `http://${ipAddress}:${port}`
 
       const response = await axios.post(`${serverUrl}/api/v1/system/pair-client`, {
-        mac_address: macAddress,
-        friendly_name: 'Billing Terminal'
+        macAddress,
+        friendlyName: terminalName
       })
 
       if (response.status === 200) {
         setStatus('success')
         localStorage.setItem('mainServerIp', ipAddress)
         localStorage.setItem('mainServerPort', port)
+        localStorage.setItem('terminalName', terminalName)
 
         setTimeout(() => {
           navigate('/login')
@@ -45,97 +65,138 @@ export default function Setup() {
     }
   }
 
-  return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 font-sans text-slate-100">
-      <div className="max-w-md w-full bg-slate-800 rounded-3xl shadow-2xl overflow-hidden border border-slate-700/50">
-        <div className="p-8 text-center bg-gradient-to-b from-slate-800 to-slate-800/80">
-          <div className="w-16 h-16 bg-blue-500/20 text-blue-400 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-inner ring-1 ring-blue-500/30">
-            <Server size={32} />
+  // Render Step 0: Splash Screen
+  if (step === 0) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center justify-center p-6 font-sans drag-region">
+        <div className="flex items-center gap-3 animate-pulse">
+          <div className="w-12 h-12 rounded-xl bg-white flex items-center justify-center shadow-lg">
+            <Server className="w-8 h-8 text-black" />
           </div>
-          <h1 className="text-3xl font-bold tracking-tight text-white mb-2 font-display">
-            Network Setup
-          </h1>
-          <p className="text-slate-400 text-sm">
-            Configure this terminal to connect to your Main Local Server.
-          </p>
+          <span className="text-4xl font-bold tracking-tight">Cashlio</span>
         </div>
+        <p className="mt-4 text-zinc-400 font-medium">Initializing Cashier Terminal...</p>
+      </div>
+    )
+  }
 
-        <div className="px-8 pb-8">
-          <form onSubmit={handleConnect} className="space-y-6">
+  // Render Step 1: Network Discovery
+  return (
+    <div className="min-h-screen bg-white flex flex-col items-center justify-center p-4 font-sans text-zinc-900 drag-region">
+      <Card className="w-full max-w-md border-zinc-200 bg-white shadow-sm rounded-lg no-drag-region">
+        <CardHeader className="text-center space-y-4 pb-8">
+          <div className="w-16 h-16 bg-zinc-100 text-zinc-900 rounded-lg flex items-center justify-center mx-auto border border-zinc-200">
+            <Server size={32} strokeWidth={1.5} />
+          </div>
+          <div className="space-y-2">
+            <CardTitle className="text-3xl font-bold tracking-tight text-zinc-900">
+              Network Discovery
+            </CardTitle>
+            <CardDescription className="text-zinc-500">
+              Configure this terminal to connect to your Main Local Server.
+            </CardDescription>
+          </div>
+        </CardHeader>
+
+        <form onSubmit={handleConnect}>
+          <CardContent className="space-y-6">
             <div className="space-y-4">
-              <div>
-                <label
-                  htmlFor="ipAddress"
-                  className="block text-sm font-medium text-slate-300 mb-2"
-                >
-                  Main Server IP Address
-                </label>
-                <input
+              <div className="space-y-2">
+                <Label htmlFor="ipAddress" className="text-sm font-medium text-zinc-900 ml-1">
+                  Server URL / IP Address
+                </Label>
+                <Input
                   id="ipAddress"
                   type="text"
                   placeholder="e.g. 192.168.1.100"
                   value={ipAddress}
                   onChange={(e) => setIpAddress(e.target.value)}
-                  className="w-full bg-slate-900/50 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                  className="bg-white border-zinc-200 text-zinc-900 focus-visible:ring-zinc-900 focus-visible:ring-2 rounded-md h-10"
                   required
                 />
               </div>
 
-              <div>
-                <label htmlFor="port" className="block text-sm font-medium text-slate-300 mb-2">
-                  Port Configuration
-                </label>
-                <input
+              <div className="space-y-2">
+                <Label htmlFor="terminalName" className="text-sm font-medium text-zinc-900 ml-1">
+                  Terminal Name
+                </Label>
+                <div className="relative">
+                  <Monitor className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 pointer-events-none" />
+                  <Input
+                    id="terminalName"
+                    type="text"
+                    placeholder="e.g. Counter 1, Front Desk"
+                    value={terminalName}
+                    onChange={(e) => setTerminalName(e.target.value)}
+                    className="bg-white border-zinc-200 text-zinc-900 focus-visible:ring-zinc-900 focus-visible:ring-2 rounded-md h-10 pl-9"
+                    required
+                  />
+                </div>
+                <p className="text-xs text-zinc-500 mt-1 ml-1">
+                  This name will be shown in the Manager app's device list.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="port" className="text-sm font-medium text-zinc-900 ml-1">
+                  Port
+                </Label>
+                <Input
                   id="port"
                   type="text"
-                  placeholder="5000"
+                  placeholder="52001"
                   value={port}
                   onChange={(e) => setPort(e.target.value)}
-                  className="w-full bg-slate-900/50 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                  className="bg-white border-zinc-200 text-zinc-900 focus-visible:ring-zinc-900 focus-visible:ring-2 rounded-md h-10"
                 />
-                <p className="text-xs text-slate-500 mt-2">
-                  Leave as 5000 unless changed on the main server.
+                <p className="text-xs text-zinc-500 mt-1 ml-1">
+                  Leave as 52001 unless specified by network admin.
                 </p>
               </div>
             </div>
 
             {status === 'error' && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex gap-3 text-red-400 text-sm items-start">
-                <AlertTriangle size={18} className="shrink-0 mt-0.5" />
-                <p>{errorMessage}</p>
-              </div>
+              <Alert
+                variant="destructive"
+                className="bg-red-50 border-red-200 text-red-900 rounded-md"
+              >
+                <AlertTriangle className="h-4 w-4 stroke-red-600" />
+                <AlertTitle className="text-red-800 font-semibold">Connection Failed</AlertTitle>
+                <AlertDescription className="text-red-700">{errorMessage}</AlertDescription>
+              </Alert>
             )}
 
             {status === 'success' && (
-              <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4 flex gap-3 text-emerald-400 text-sm items-center justify-center font-medium">
-                <CheckCircle size={18} />
-                <p>Connection established! Redirecting...</p>
-              </div>
+              <Alert className="bg-emerald-50 border-emerald-200 text-emerald-900 rounded-md">
+                <CheckCircle className="h-4 w-4 stroke-emerald-600" />
+                <AlertTitle className="text-emerald-800 font-semibold">Connected</AlertTitle>
+                <AlertDescription className="text-emerald-700">
+                  Pairing successful! Redirecting to login...
+                </AlertDescription>
+              </Alert>
             )}
+          </CardContent>
 
-            <button
+          <CardFooter>
+            <Button
               type="submit"
               disabled={status === 'loading' || status === 'success'}
-              className={`w-full font-semibold rounded-xl py-3.5 px-4 flex items-center justify-center gap-2 transition-all duration-200 ${
-                status === 'loading' || status === 'success'
-                  ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
-                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/20 hover:shadow-blue-500/30 ring-1 ring-blue-500/50'
-              }`}
+              className="w-full bg-zinc-900 hover:bg-zinc-800 text-white rounded-md h-10 border-0 shadow-none font-medium text-sm"
             >
               {status === 'loading' ? (
                 <>
-                  <Settings className="animate-spin" size={20} />
+                  <Settings className="animate-spin mr-2 h-4 w-4" />
                   Connecting...
                 </>
               ) : status === 'success' ? (
-                'Connected'
+                'Paired Successfully'
               ) : (
                 'Pair with Server'
               )}
-            </button>
-          </form>
-        </div>
-      </div>
+            </Button>
+          </CardFooter>
+        </form>
+      </Card>
     </div>
   )
 }

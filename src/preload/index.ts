@@ -5,10 +5,10 @@ const api = {
   getMacAddress: () => ipcRenderer.invoke('get-mac-address')
 }
 
-// Minimal stub for electron API if needed later, but we rely on api.getMacAddress
 const electronStub = {
   ipcRenderer: {
     send: (channel: string, ...args: any[]) => ipcRenderer.send(channel, ...args),
+    invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args),
     on: (channel: string, listener: (event: Electron.IpcRendererEvent, ...args: any[]) => void) => ipcRenderer.on(channel, listener),
   }
 }

@@ -1,6 +1,32 @@
+# Dependencies
 node_modules
+
+# Build outputs
 dist
 out
+.dist
+release
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# Temporary / dev-only scripts
+temp.js
+mock-server.js
+
+# Editor & OS
 .DS_Store
+Thumbs.db
 .eslintcache
+
+# Logs
+*.log
 *.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
