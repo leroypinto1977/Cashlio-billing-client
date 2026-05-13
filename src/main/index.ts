@@ -2,6 +2,28 @@ import { app, shell, BrowserWindow, ipcMain, session } from 'electron'
 import { join } from 'path'
 import os from 'os'
 import icon from '../../resources/icon.png?asset'
+import {
+  getDb,
+  enqueuePendingBill,
+  listPendingBills,
+  countPendingBills,
+  removePendingBill,
+  markPendingBillAttempted,
+  markPendingBillFailedPermanent,
+  replaceProductCache,
+  searchProductCache,
+  getProductCacheUpdatedAt,
+  searchProducts,
+  getProductByItemCode,
+  countProductMirror,
+  searchCustomers,
+  applySyncEvents,
+  getSyncState,
+  setSyncState,
+  nextLocalBillNumber,
+  peekLocalBillNumber
+} from './db'
+import type { SyncEventInput } from './db'
 
 function getMacAddress(): string {
   const interfaces = os.networkInterfaces()
@@ -63,6 +85,129 @@ app.whenReady().then(() => {
 
   // Expose real MAC address to renderer securely via IPC
   ipcMain.handle('get-mac-address', () => getMacAddress())
+
+  // ─── Local SQLite ───────────────────────────────────────────────────────
+  // Open the DB on startup so failures surface early and migrations run
+  // before any IPC call hits.
+  try {
+    getDb()
+  } catch (e) {
+    console.error('[db] failed to open SQLite:', e)
+  }
+
+  // Pending bills (offline outbox)
+  ipcMain.handle(
+    'db:bill:enqueue',
+    (_e, input: { clientLocalId: string; payload: unknown; display: unknown }) => {
+      enqueuePendingBill(input)
+      return { ok: true, count: countPendingBills() }
+    }
+  )
+  ipcMain.handle('db:bill:list-pending', () => listPendingBills())
+  ipcMain.handle('db:bill:count-pending', () => countPendingBills())
+  ipcMain.handle('db:bill:remove', (_e, clientLocalId: string) => {
+    removePendingBill(clientLocalId)
+    return { ok: true, count: countPendingBills() }
+  })
+  ipcMain.handle(
+    'db:bill:mark-attempted',
+    (_e, input: { clientLocalId: string; error: string | null }) => {
+      markPendingBillAttempted(input)
+      return { ok: true }
+    }
+  )
+  ipcMain.handle(
+    'db:bill:mark-failed',
+    (_e, input: { clientLocalId: string; error: string }) => {
+      markPendingBillFailedPermanent(input)
+      return { ok: true, count: countPendingBills() }
+    }
+  )
+
+  // Product cache
+  ipcMain.handle(
+    'db:product:replace-cache',
+    (_e, products: Array<Record<string, unknown>>) => {
+      replaceProductCache(products)
+      return { ok: true, count: products.length, updatedAt: Date.now() }
+    }
+  )
+  ipcMain.handle(
+    'db:product:search',
+    (_e, input: { query: string; limit?: number }) =>
+      searchProductCache(input.query, input.limit ?? 20)
+  )
+  ipcMain.handle('db:product:cache-updated-at', () => getProductCacheUpdatedAt())
+
+  // Local mirror (Phase 3D)
+  ipcMain.handle(
+    'db:mirror:product-search',
+    (_e, input: { query: string; limit?: number }) =>
+      searchProducts(input.query, input.limit ?? 20)
+  )
+  ipcMain.handle('db:mirror:product-by-item-code', (_e, itemCode: string) =>
+    getProductByItemCode(itemCode)
+  )
+  ipcMain.handle('db:mirror:product-count', () => countProductMirror())
+  ipcMain.handle(
+    'db:mirror:customer-search',
+    (_e, input: { query: string; limit?: number }) =>
+      searchCustomers(input.query, input.limit ?? 20)
+  )
+  ipcMain.handle('db:sync:apply-events', (_e, events: SyncEventInput[]) =>
+    applySyncEvents(events)
+  )
+
+  // Terminal-side bill number minter (Phase 3D)
+  ipcMain.handle('db:terminal:next-bill-number', (_e, prefix: string) =>
+    nextLocalBillNumber(prefix)
+  )
+  ipcMain.handle('db:terminal:peek-bill-number', (_e, prefix: string) =>
+    peekLocalBillNumber(prefix)
+  )
+
+  // Sync state (key/value)
+  ipcMain.handle('db:sync:get', (_e, key: string) => getSyncState(key))
+  ipcMain.handle('db:sync:set', (_e, input: { key: string; value: string }) => {
+    setSyncState(input.key, input.value)
+    return { ok: true }
+  })
+
+  // Print a receipt: renderer hands us the full HTML, we render it in a
+  // hidden BrowserWindow and trigger printing. silent:false opens the OS
+  // print dialog; pass deviceName via localStorage→arg in the future for
+  // truly silent printing once a default printer is configured.
+  ipcMain.handle('print-receipt', async (_evt, payload: { html: string; billNumber?: string; deviceName?: string }) => {
+    const html = payload?.html ?? ''
+    if (!html) return { ok: false, error: 'NO_HTML' }
+    const printWin = new BrowserWindow({
+      show: false,
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false }
+    })
+    try {
+      const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(html)
+      await printWin.loadURL(dataUrl)
+      await new Promise<void>((resolve, reject) => {
+        printWin.webContents.print(
+          {
+            silent: !!payload?.deviceName,
+            deviceName: payload?.deviceName,
+            printBackground: true,
+            margins: { marginType: 'none' }
+          },
+          (success, failureReason) => {
+            if (success) resolve()
+            else reject(new Error(failureReason || 'PRINT_CANCELLED'))
+          }
+        )
+      })
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    } finally {
+      if (!printWin.isDestroyed()) printWin.close()
+    }
+  })
 
   // Override CSP from the main process so LAN HTTP requests to the branch server are allowed.
   // The HTML meta-tag CSP cannot reliably wildcard arbitrary IPs in Chromium.

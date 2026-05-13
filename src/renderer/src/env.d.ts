@@ -1,7 +1,2 @@
 /// <reference types="vite/client" />
-
-interface Window {
-  api: {
-    getMacAddress: () => Promise<string>
-  }
-}
+/// <reference path="../../preload/index.d.ts" />

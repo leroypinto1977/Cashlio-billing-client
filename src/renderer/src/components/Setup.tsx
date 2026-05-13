@@ -27,6 +27,7 @@ export default function Setup() {
       }, 3000)
       return () => clearTimeout(timer)
     }
+    return undefined
   }, [step])
 
   const handleConnect = async (e: React.FormEvent) => {
@@ -50,11 +51,21 @@ export default function Setup() {
         localStorage.setItem('mainServerIp', ipAddress)
         localStorage.setItem('mainServerPort', port)
         localStorage.setItem('terminalName', terminalName)
+        if (response.data.clientId) {
+          localStorage.setItem('terminalDeviceId', response.data.clientId)
+        }
+        // Phase 3D: terminalCode is the prefix this terminal uses for offline
+        // bill numbers (T1-, T2-, …). Required to mint bills without server
+        // coordination.
+        if (response.data.terminalCode) {
+          localStorage.setItem('terminalCode', response.data.terminalCode)
+        }
 
         setTimeout(() => {
           navigate('/login')
         }, 1500)
       }
+      return undefined
     } catch (error: any) {
       console.error('Connection failed:', error)
       setStatus('error')

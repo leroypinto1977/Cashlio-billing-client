@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ShoppingCart, LogOut, Monitor, Wifi, Clock } from 'lucide-react'
+import { ShoppingCart, LogOut, Monitor, Wifi, WifiOff, Clock, AlertCircle } from 'lucide-react'
 import { Button } from './ui/button'
+import BillingScreen from './BillingScreen'
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -9,6 +10,7 @@ export default function Dashboard() {
   const [terminalName, setTerminalName] = useState('')
   const [serverAddress, setServerAddress] = useState('')
   const [currentTime, setCurrentTime] = useState(new Date())
+  const [pendingBills, setPendingBills] = useState(0)
 
   useEffect(() => {
     const token = localStorage.getItem('cashierToken')
@@ -53,9 +55,18 @@ export default function Dashboard() {
 
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-1.5 text-xs text-zinc-500">
-            <Wifi className="w-3.5 h-3.5 text-emerald-500" />
+            {pendingBills > 0
+              ? <WifiOff className="w-3.5 h-3.5 text-amber-500" />
+              : <Wifi className="w-3.5 h-3.5 text-emerald-500" />
+            }
             <span className="font-mono">{serverAddress}</span>
           </div>
+          {pendingBills > 0 && (
+            <div className="flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full">
+              <AlertCircle className="w-3.5 h-3.5" />
+              {pendingBills} bill{pendingBills !== 1 ? 's' : ''} pending sync
+            </div>
+          )}
           <div className="flex items-center gap-1.5 text-xs text-zinc-500">
             <Clock className="w-3.5 h-3.5" />
             <span className="font-mono tabular-nums">{currentTime.toLocaleTimeString()}</span>
@@ -77,43 +88,9 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Main content */}
-      <main className="flex-1 flex flex-col items-center justify-center p-8 gap-6">
-        <div className="w-24 h-24 rounded-2xl bg-white border border-zinc-200 shadow-sm flex items-center justify-center">
-          <ShoppingCart className="w-12 h-12 text-zinc-300" strokeWidth={1.5} />
-        </div>
-
-        <div className="text-center">
-          <h1 className="text-2xl font-bold text-zinc-900">Ready to Bill</h1>
-          <p className="text-zinc-500 mt-2 text-sm">
-            Cashier dashboard coming soon. Connected to{' '}
-            <span className="font-mono text-zinc-700">{serverAddress}</span>.
-          </p>
-        </div>
-
-        <div className="flex gap-3 mt-2">
-          <Button className="bg-zinc-900 hover:bg-zinc-800 text-white px-8 h-11 rounded-lg font-medium">
-            New Bill
-          </Button>
-        </div>
-
-        <div className="mt-8 grid grid-cols-3 gap-4 w-full max-w-lg">
-          <div className="bg-white rounded-xl border border-zinc-200 p-4 text-center">
-            <p className="text-2xl font-bold text-zinc-900">0</p>
-            <p className="text-xs text-zinc-500 mt-1">Bills Today</p>
-          </div>
-          <div className="bg-white rounded-xl border border-zinc-200 p-4 text-center">
-            <p className="text-2xl font-bold text-zinc-900">₹0</p>
-            <p className="text-xs text-zinc-500 mt-1">Sales Today</p>
-          </div>
-          <div className="bg-white rounded-xl border border-zinc-200 p-4 text-center">
-            <div className="flex items-center justify-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
-              <p className="text-sm font-semibold text-emerald-700">Online</p>
-            </div>
-            <p className="text-xs text-zinc-500 mt-1">Server Status</p>
-          </div>
-        </div>
+      {/* Main content — billing screen */}
+      <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        <BillingScreen onPendingCountChange={setPendingBills} />
       </main>
     </div>
   )
