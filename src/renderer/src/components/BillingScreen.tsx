@@ -8,6 +8,12 @@ import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Modal } from './ui/modal'
 import { printReceipt, type ReceiptBill, type ReceiptShop } from '../lib/receipt'
+import { computeInvoiceTotals } from '@shared/money'
+import { validateName, validateMobile } from '@shared/validation'
+import {
+  isLengthMode, parseQty, qtyStep, roundQty, formatQty, formatQtyWithUnit,
+  type SellMode
+} from '@shared/units'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -19,7 +25,14 @@ type Product = {
   unitOfMeasure: string
   sellingRate: number
   gstPercentage: number
+  /** Fractional for cut-to-length products — 14.5 m of pipe, not 14 pieces. */
   totalStock: number
+  /**
+   * Absent on rows cached before cut-to-length shipped and on older branch
+   * servers; every read goes through the @shared/units helpers, which treat
+   * undefined as UNIT.
+   */
+  sellMode?: SellMode
 }
 
 type CartItem = {
@@ -27,6 +40,7 @@ type CartItem = {
   itemCode: string
   productName: string
   unitOfMeasure: string
+  sellMode?: SellMode
   unitRate: number
   gstPercentage: number
   quantity: number
@@ -140,6 +154,16 @@ function calcLine(item: Omit<CartItem, 'lineTotal' | 'lineGstAmount'>): Pick<Car
     ? lineTotal * item.gstPercentage / (100 + item.gstPercentage)
     : 0
   return { lineTotal, lineGstAmount }
+}
+
+/**
+ * Keeps a quantity sellable: never zero or negative, never more than the stock
+ * on hand, and never finer than the product's smallest increment.
+ */
+function clampQty(qty: number, opts: { maxQty: number; sellMode?: SellMode }): number {
+  const step = qtyStep(opts.sellMode)
+  const max = opts.maxQty > 0 ? opts.maxQty : step
+  return roundQty(Math.min(Math.max(qty, step), max))
 }
 
 function fmt(n: number) {
@@ -374,12 +398,15 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
   // Falls back to selecting the lone result if no exact match.
   const addProductDirect = (p: Product) => {
     if (p.totalStock <= 0) return
+    // A scanned length of pipe has no implied quantity — 1 m would be a guess,
+    // so the cashier is asked to measure instead of being given a wrong line.
+    if (isLengthMode(p.sellMode)) { selectProduct(p); return }
     setCartItems((prev) => {
       const idx = prev.findIndex((it) => it.productId === p.id)
       if (idx >= 0) {
         return prev.map((it, i) => {
           if (i !== idx) return it
-          const q = Math.min(it.quantity + 1, p.totalStock)
+          const q = clampQty(it.quantity + qtyStep(it.sellMode), it)
           const next = { ...it, quantity: q }
           return { ...next, ...calcLine(next) }
         })
@@ -387,6 +414,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
       const base: Omit<CartItem, 'lineTotal' | 'lineGstAmount'> = {
         productId: p.id, itemCode: p.itemCode,
         productName: p.name, unitOfMeasure: p.unitOfMeasure,
+        sellMode: p.sellMode ?? 'UNIT',
         unitRate: p.sellingRate, gstPercentage: p.gstPercentage,
         quantity: 1, maxQty: p.totalStock,
         lineDiscountPct: 0, lineDiscountAmt: 0
@@ -436,7 +464,12 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
 
   const confirmAddToCart = () => {
     if (!pendingProduct) return
-    const qty = Math.max(1, Math.min(parseInt(pendingQty) || 1, pendingProduct.totalStock))
+    // parseQty keeps 3 decimals for cut lengths and floors whole-unit entries,
+    // so "2.5" is 2.5 m of cable but only 2 switches.
+    const qty = clampQty(parseQty(pendingQty, pendingProduct.sellMode), {
+      maxQty: pendingProduct.totalStock,
+      sellMode: pendingProduct.sellMode
+    })
     setCartItems((prev) => {
       const idx = prev.findIndex((it) => it.productId === pendingProduct.id)
       if (idx >= 0) {
@@ -449,6 +482,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
       const base: Omit<CartItem, 'lineTotal' | 'lineGstAmount'> = {
         productId: pendingProduct.id, itemCode: pendingProduct.itemCode,
         productName: pendingProduct.name, unitOfMeasure: pendingProduct.unitOfMeasure,
+        sellMode: pendingProduct.sellMode ?? 'UNIT',
         unitRate: pendingProduct.sellingRate, gstPercentage: pendingProduct.gstPercentage,
         quantity: qty, maxQty: pendingProduct.totalStock,
         lineDiscountPct: 0, lineDiscountAmt: 0
@@ -459,13 +493,30 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
     setPendingQty('1')
   }
 
-  const updateQty = (idx: number, delta: number) => {
+  // Whole-unit lines step by 1 from the +/− buttons.
+  const updateQty = (idx: number, direction: 1 | -1) => {
     setCartItems((prev) => prev.map((it, i) => {
       if (i !== idx) return it
-      const q = Math.max(1, Math.min(it.quantity + delta, it.maxQty))
+      const q = clampQty(it.quantity + direction * qtyStep(it.sellMode), it)
       const next = { ...it, quantity: q }
       return { ...next, ...calcLine(next) }
     }))
+  }
+
+  // Cut-to-length lines are typed instead: nudging 14.5 m by 0.001 would be
+  // useless. The raw keystrokes live in `qtyDraft` until the field is left,
+  // otherwise "2." would be parsed back to "2" and the decimal point could
+  // never be typed at all.
+  const [qtyDraft, setQtyDraft] = useState<{ idx: number; value: string } | null>(null)
+
+  const commitQtyDraft = (idx: number, raw: string): void => {
+    setCartItems((prev) => prev.map((it, i) => {
+      if (i !== idx) return it
+      const q = clampQty(parseQty(raw, it.sellMode), it)
+      const next = { ...it, quantity: q }
+      return { ...next, ...calcLine(next) }
+    }))
+    setQtyDraft(null)
   }
 
   const updateDiscount = (idx: number, field: 'lineDiscountPct' | 'lineDiscountAmt', raw: string) => {
@@ -610,7 +661,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
     } catch (err: unknown) {
       const e = err as { data?: { error?: string; productName?: string; available?: number }; status?: number }
       if (e.data?.error === 'INSUFFICIENT_STOCK') {
-        setSubmitError(`Insufficient stock for "${e.data.productName}" (available: ${e.data.available}).`)
+        setSubmitError(`Insufficient stock for "${e.data.productName}" (available: ${formatQty(e.data.available)}).`)
       } else if (e.status && e.status >= 400 && e.status < 500) {
         // Business-logic rejection — don't save offline
         setSubmitError('Failed to process bill. Please check cart and try again.')
@@ -888,7 +939,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
           <div className="border-t pt-3 mt-2 space-y-1">
             {successBill.items?.map((it, i) => (
               <div key={i} className="flex justify-between text-xs text-muted-foreground">
-                <span>{it.productName} × {it.quantity}</span>
+                <span>{it.productName} × {formatQty(it.quantity)}</span>
                 <span>₹{fmt(it.lineTotal)}</span>
               </div>
             ))}
@@ -1026,9 +1077,15 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                         </div>
                         <div className="ml-4 text-right shrink-0">
                           <p className="font-semibold text-zinc-900 text-sm">₹{fmt(p.sellingRate)}</p>
-                          <p className={`text-xs mt-0.5 ${outOfStock ? 'text-red-500' : 'text-emerald-600'}`}>
-                            {outOfStock ? 'Out of stock' : `${p.totalStock} ${p.unitOfMeasure}`}
-                          </p>
+                          {outOfStock ? (
+                            <span className="inline-block mt-0.5 px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-600 text-[10px] font-semibold uppercase tracking-wide">
+                              No stock
+                            </span>
+                          ) : (
+                            <p className="text-xs mt-0.5 text-emerald-600">
+                              {formatQtyWithUnit(p.totalStock, p.unitOfMeasure)}
+                            </p>
+                          )}
                         </div>
                       </button>
                     )
@@ -1048,24 +1105,34 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                 <div className="flex-1 min-w-0">
                   <p className="font-semibold text-zinc-900 text-sm truncate">{pendingProduct.name}</p>
                   <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                    ₹{fmt(pendingProduct.sellingRate)} · {pendingProduct.totalStock} {pendingProduct.unitOfMeasure} in stock
+                    ₹{fmt(pendingProduct.sellingRate)} · {formatQtyWithUnit(pendingProduct.totalStock, pendingProduct.unitOfMeasure)} in stock
                   </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <label className="text-xs font-semibold text-zinc-600 whitespace-nowrap">Qty:</label>
-                  <input
-                    ref={pendingQtyRef}
-                    type="number"
-                    min="1"
-                    max={pendingProduct.totalStock}
-                    value={pendingQty}
-                    onChange={(e) => setPendingQty(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') confirmAddToCart()
-                      if (e.key === 'Escape') setPendingProduct(null)
-                    }}
-                    className="w-20 h-9 px-3 text-sm font-semibold text-center rounded-lg border-2 border-zinc-300 focus:border-zinc-900 focus:outline-none bg-white tabular-nums"
-                  />
+                  <label className="text-xs font-semibold text-zinc-600 whitespace-nowrap">
+                    {isLengthMode(pendingProduct.sellMode) ? 'Length:' : 'Qty:'}
+                  </label>
+                  <div className="relative">
+                    <input
+                      ref={pendingQtyRef}
+                      type="number"
+                      min={qtyStep(pendingProduct.sellMode)}
+                      max={pendingProduct.totalStock}
+                      step={qtyStep(pendingProduct.sellMode)}
+                      value={pendingQty}
+                      onChange={(e) => setPendingQty(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') confirmAddToCart()
+                        if (e.key === 'Escape') setPendingProduct(null)
+                      }}
+                      className={`h-9 pl-3 text-sm font-semibold text-center rounded-lg border-2 border-zinc-300 focus:border-zinc-900 focus:outline-none bg-white tabular-nums ${isLengthMode(pendingProduct.sellMode) ? 'w-28 pr-9' : 'w-20 pr-3'}`}
+                    />
+                    {isLengthMode(pendingProduct.sellMode) && (
+                      <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">
+                        {pendingProduct.unitOfMeasure}
+                      </span>
+                    )}
+                  </div>
                   <Button
                     onClick={confirmAddToCart}
                     className="h-9 px-3 text-sm font-semibold bg-zinc-900 hover:bg-zinc-800 text-white"
@@ -1114,25 +1181,45 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                         <p className="text-xs text-muted-foreground font-mono mt-0.5">{it.itemCode}</p>
                       </td>
                       <td className="px-2 py-2.5">
-                        <div className="flex items-center justify-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => updateQty(idx, -1)}
-                            disabled={it.quantity <= 1}
-                            className="w-6 h-6 rounded-md border flex items-center justify-center hover:bg-zinc-100 disabled:opacity-30 transition-colors"
-                          >
-                            <Minus className="w-3 h-3" />
-                          </button>
-                          <span className="w-7 text-center font-semibold tabular-nums text-sm">{it.quantity}</span>
-                          <button
-                            type="button"
-                            onClick={() => updateQty(idx, 1)}
-                            disabled={it.quantity >= it.maxQty}
-                            className="w-6 h-6 rounded-md border flex items-center justify-center hover:bg-zinc-100 disabled:opacity-30 transition-colors"
-                          >
-                            <Plus className="w-3 h-3" />
-                          </button>
-                        </div>
+                        {isLengthMode(it.sellMode) ? (
+                          <div className="flex items-center justify-center gap-1">
+                            <input
+                              type="number"
+                              min={qtyStep(it.sellMode)}
+                              max={it.maxQty}
+                              step={qtyStep(it.sellMode)}
+                              value={qtyDraft?.idx === idx ? qtyDraft.value : formatQty(it.quantity)}
+                              onChange={(e) => setQtyDraft({ idx, value: e.target.value })}
+                              onBlur={(e) => commitQtyDraft(idx, e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') e.currentTarget.blur()
+                                if (e.key === 'Escape') setQtyDraft(null)
+                              }}
+                              className="w-16 h-7 px-1.5 text-xs font-semibold text-right rounded-md border border-input bg-background focus:outline-none focus:ring-1 focus:ring-ring tabular-nums"
+                            />
+                            <span className="text-xs text-muted-foreground">{it.unitOfMeasure}</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => updateQty(idx, -1)}
+                              disabled={it.quantity <= qtyStep(it.sellMode)}
+                              className="w-6 h-6 rounded-md border flex items-center justify-center hover:bg-zinc-100 disabled:opacity-30 transition-colors"
+                            >
+                              <Minus className="w-3 h-3" />
+                            </button>
+                            <span className="w-7 text-center font-semibold tabular-nums text-sm">{formatQty(it.quantity)}</span>
+                            <button
+                              type="button"
+                              onClick={() => updateQty(idx, 1)}
+                              disabled={it.quantity >= it.maxQty}
+                              className="w-6 h-6 rounded-md border flex items-center justify-center hover:bg-zinc-100 disabled:opacity-30 transition-colors"
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                          </div>
+                        )}
                         {it.quantity >= it.maxQty && (
                           <p className="text-center text-xs text-amber-600 mt-0.5">max</p>
                         )}

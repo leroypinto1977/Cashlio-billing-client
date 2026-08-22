@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { join } from 'path'
 import { mkdirSync } from 'fs'
 import Database from 'better-sqlite3'
+import { roundQty, type SellMode } from '../shared/units'
 
 let db: Database.Database | null = null
 
@@ -24,8 +25,11 @@ function migrate(d: Database.Database): void {
       version INTEGER PRIMARY KEY
     );
   `)
-  const row = d.prepare('SELECT version FROM schema_version LIMIT 1').get() as
-    | { version: number }
+  // Every step appends its own row, so the newest one is the highest — not
+  // the first. Reading `LIMIT 1` handed back the v1 row on a v2 database and
+  // made the v2 step re-run (and throw) on every launch after the first.
+  const row = d.prepare('SELECT MAX(version) AS version FROM schema_version').get() as
+    | { version: number | null }
     | undefined
   const current = row?.version ?? 0
 
@@ -99,6 +103,53 @@ function migrate(d: Database.Database): void {
       );
     `)
     d.prepare('INSERT INTO schema_version (version) VALUES (?)').run(2)
+  }
+
+  if (current < 3) {
+    // Cut-to-length products: `total_stock` is now a pool of the product's
+    // unit of measure (14.5 m), not a count of whole pieces, and each row
+    // carries the sell mode that decides how quantities are entered.
+    // SQLite can't widen a column in place, so the table is rebuilt and the
+    // rows copied across. `sell_mode` and the un-truncated stock are recovered
+    // from the stored payload — the pull cursor never rewinds, so rows that are
+    // already mirrored would otherwise never learn their mode, and the old
+    // column had already floored 14.5 m of pipe to 14. A payload that somehow
+    // isn't valid JSON must not abort the rebuild and lock the terminal out of
+    // its own database, so those rows fall back to the old column.
+    d.exec(`
+      ALTER TABLE products RENAME TO products_v2;
+
+      CREATE TABLE products (
+        id              TEXT PRIMARY KEY,
+        item_code       TEXT,
+        name            TEXT NOT NULL,
+        is_active       INTEGER NOT NULL DEFAULT 1,
+        sell_mode       TEXT    NOT NULL DEFAULT 'UNIT',
+        total_stock     REAL    NOT NULL DEFAULT 0,
+        payload_json    TEXT NOT NULL,
+        updated_at      INTEGER NOT NULL
+      );
+
+      INSERT INTO products
+        (id, item_code, name, is_active, sell_mode, total_stock, payload_json, updated_at)
+      SELECT id, item_code, name, is_active,
+             CASE WHEN json_valid(payload_json)
+                    THEN CASE WHEN json_extract(payload_json, '$.sellMode') = 'LENGTH'
+                              THEN 'LENGTH' ELSE 'UNIT' END
+                    ELSE 'UNIT' END,
+             CAST(COALESCE(
+                    CASE WHEN json_valid(payload_json)
+                         THEN json_extract(payload_json, '$.totalStock') END,
+                    total_stock, 0) AS REAL),
+             payload_json, updated_at
+        FROM products_v2;
+
+      DROP TABLE products_v2;
+
+      CREATE INDEX idx_products_item_code ON products(item_code);
+      CREATE INDEX idx_products_name ON products(name);
+    `)
+    d.prepare('INSERT INTO schema_version (version) VALUES (?)').run(3)
   }
 }
 
@@ -241,7 +292,9 @@ export function searchProductCache(query: string, limit = 20): unknown[] {
         LIMIT ?`
     )
     .all(q, q, limit) as Array<{ payload_json: string }>
-  return rows.map((r) => safeParse(r.payload_json))
+  // The legacy cache has no columns of its own beyond the payload, so the
+  // quantity fields are normalised out of the payload itself.
+  return rows.map((r) => hydrateProduct(safeParse(r.payload_json)))
 }
 
 export function getProductCacheUpdatedAt(): number | null {
@@ -254,31 +307,37 @@ export function getProductCacheUpdatedAt(): number | null {
 
 // ─── Product mirror (Phase 3D) ──────────────────────────────────────────────
 
+type ProductMirrorRow = {
+  payload_json: string
+  sell_mode: string | null
+  total_stock: number | null
+}
+
 export function searchProducts(query: string, limit = 20): unknown[] {
   const d = getDb()
   const q = `%${query.toLowerCase()}%`
   const rows = d
     .prepare(
-      `SELECT payload_json FROM products
+      `SELECT payload_json, sell_mode, total_stock FROM products
         WHERE is_active = 1
           AND (LOWER(name) LIKE ? OR LOWER(item_code) LIKE ?)
         ORDER BY name ASC
         LIMIT ?`
     )
-    .all(q, q, limit) as Array<{ payload_json: string }>
-  return rows.map((r) => safeParse(r.payload_json))
+    .all(q, q, limit) as ProductMirrorRow[]
+  return rows.map((r) => hydrateProduct(safeParse(r.payload_json), r))
 }
 
 export function getProductByItemCode(itemCode: string): unknown | null {
   const d = getDb()
   const r = d
     .prepare(
-      `SELECT payload_json FROM products
+      `SELECT payload_json, sell_mode, total_stock FROM products
         WHERE item_code = ? AND is_active = 1
         LIMIT 1`
     )
-    .get(itemCode) as { payload_json: string } | undefined
-  return r ? safeParse(r.payload_json) : null
+    .get(itemCode) as ProductMirrorRow | undefined
+  return r ? hydrateProduct(safeParse(r.payload_json), r) : null
 }
 
 export function countProductMirror(): number {
@@ -322,12 +381,14 @@ export function applySyncEvents(events: SyncEventInput[]): { applied: number; la
   if (events.length === 0) return { applied: 0, lastId: null }
   const d = getDb()
   const upsertProduct = d.prepare(
-    `INSERT INTO products (id, item_code, name, is_active, total_stock, payload_json, updated_at)
-     VALUES (@id, @itemCode, @name, @isActive, @totalStock, @payload, @ts)
+    `INSERT INTO products
+       (id, item_code, name, is_active, sell_mode, total_stock, payload_json, updated_at)
+     VALUES (@id, @itemCode, @name, @isActive, @sellMode, @totalStock, @payload, @ts)
      ON CONFLICT(id) DO UPDATE SET
        item_code = excluded.item_code,
        name = excluded.name,
        is_active = excluded.is_active,
+       sell_mode = excluded.sell_mode,
        total_stock = excluded.total_stock,
        payload_json = excluded.payload_json,
        updated_at = excluded.updated_at`
@@ -371,7 +432,10 @@ export function applySyncEvents(events: SyncEventInput[]): { applied: number; la
               itemCode: asString(p.itemCode),
               name: asString(p.name) ?? '',
               isActive: p.isActive === false ? 0 : 1,
-              totalStock: Number(p.totalStock ?? 0) | 0,
+              sellMode: asSellMode(p.sellMode),
+              // Cut-to-length stock is fractional — truncating it here would
+              // report 14 m of pipe as 14.000 and silently lose the offcut.
+              totalStock: asQty(p.totalStock),
               payload: JSON.stringify(p),
               ts: Date.now()
             })
@@ -481,4 +545,31 @@ function safeParse(s: string): unknown {
 function asString(v: unknown): string | null {
   if (v == null) return null
   return String(v)
+}
+
+function asSellMode(v: unknown): SellMode {
+  return v === 'LENGTH' ? 'LENGTH' : 'UNIT'
+}
+
+/** Quantities are stored to 3dp; anything unusable becomes 0. */
+function asQty(v: unknown): number {
+  const n = Number(v ?? 0)
+  if (!Number.isFinite(n)) return 0
+  return roundQty(n)
+}
+
+/**
+ * Product rows go out to the renderer as the server payload plus the two
+ * columns the UI must be able to trust: `sellMode` (absent on rows mirrored
+ * before cut-to-length shipped, so it defaults to UNIT) and a numeric
+ * `totalStock`.
+ */
+function hydrateProduct(payload: unknown, row?: ProductMirrorRow): unknown {
+  if (!payload || typeof payload !== 'object') return payload
+  const p = payload as Record<string, unknown>
+  return {
+    ...p,
+    sellMode: asSellMode(row ? row.sell_mode : p.sellMode),
+    totalStock: asQty(row ? row.total_stock : p.totalStock)
+  }
 }
