@@ -51,10 +51,18 @@ type SavedBill = {
   subtotal?: number
   gstAmount?: number
   discountAmount?: number
+  taxableValue?: number
+  cgstAmount?: number
+  sgstAmount?: number
+  igstAmount?: number
   amountReceived?: number | null
   changeGiven: number | null
   paymentMethod: string
-  items: { productName: string; itemCode?: string; quantity: number; unitRate?: number; lineTotal: number }[]
+  items: {
+    productName: string; itemCode?: string; quantity: number; unitRate?: number; lineTotal: number
+    gstPercentage?: number; taxableValue?: number; cgstAmount?: number; sgstAmount?: number
+    igstAmount?: number; billDiscountAmt?: number
+  }[]
   customer?: { name: string } | null
   synced?: boolean  // true = on server, false = saved locally pending sync
 }
@@ -241,8 +249,19 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
         .then((d) => setBillNumber(d.billNumber))
         .catch(() => {})
     }
-    apiFetch<{ shopName?: string; branchName?: string }>('/api/v1/system/status')
-      .then((d) => setShopInfo({ name: d.shopName || 'My Shop', branch: d.branchName || null }))
+    apiFetch<{
+      shopName?: string; branchName?: string
+      address?: string | null; phone?: string | null; gstin?: string | null
+    }>('/api/v1/system/status')
+      .then((d) =>
+        setShopInfo({
+          name: d.shopName || 'My Shop',
+          branch: d.branchName || null,
+          address: d.address ?? null,
+          phone: d.phone ?? null,
+          gstin: d.gstin ?? null
+        })
+      )
       .catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -256,6 +275,10 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
     gstAmount: b.gstAmount,
     discountAmount: b.discountAmount,
     totalAmount: b.totalAmount,
+    taxableValue: b.taxableValue,
+    cgstAmount: b.cgstAmount,
+    sgstAmount: b.sgstAmount,
+    igstAmount: b.igstAmount,
     amountReceived: b.amountReceived ?? null,
     changeGiven: b.changeGiven,
     customerName: b.customer?.name ?? null,
@@ -265,7 +288,13 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
       productName: it.productName,
       quantity: it.quantity,
       unitRate: it.unitRate ?? (it.quantity > 0 ? it.lineTotal / it.quantity : 0),
-      lineTotal: it.lineTotal
+      lineTotal: it.lineTotal,
+      gstPercentage: it.gstPercentage,
+      taxableValue: it.taxableValue,
+      cgstAmount: it.cgstAmount,
+      sgstAmount: it.sgstAmount,
+      igstAmount: it.igstAmount,
+      billDiscountAmt: it.billDiscountAmt
     }))
   })
 
@@ -391,7 +420,6 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
       setUsingCachedProducts(false)
       const exact = data.products.find((p) => p.itemCode.toLowerCase() === ql)
       if (exact) { addProductDirect(exact); return }
-      if (data.products.length === 1) { selectProduct(data.products[0]); return }
       setShowDropdown(true)
     } catch {
       // Offline: try cache for an exact itemCode hit.
@@ -452,18 +480,32 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
   }
 
   const removeItem = (idx: number) => {
+    // Row indices shift on removal, so an open draft would target the wrong line.
+    setQtyDraft(null)
     setCartItems((prev) => prev.filter((_, i) => i !== idx))
   }
 
   // ─── Totals ──────────────────────────────────────────────────────────────
 
-  const subtotal = cartItems.reduce((s, it) => s + it.lineTotal, 0)
-  const totalGst = cartItems.reduce((s, it) => s + it.lineGstAmount, 0)
+  const rawSubtotal = cartItems.reduce((s, it) => s + it.lineTotal, 0)
   const billDiscFlat = parseFloat(billDiscountFlat) || 0
   const billDiscPct = parseFloat(billDiscountPct) || 0
-  const billDiscAmt = subtotal * billDiscPct / 100 + billDiscFlat
-  const grandTotal = Math.max(0, subtotal - billDiscAmt)
+  // Same calculator the server uses, so an offline receipt printed at the
+  // counter matches the invoice the server stores once the bill syncs.
+  const totals = computeInvoiceTotals(
+    cartItems.map((it) => ({ lineTotal: it.lineTotal, gstPercentage: it.gstPercentage })),
+    rawSubtotal * billDiscPct / 100 + billDiscFlat,
+    false
+  )
+  const subtotal = totals.subtotal
+  const billDiscAmt = totals.billDiscount
+  const grandTotal = totals.totalAmount
+  const totalGst = totals.gstAmount
+  const taxableValue = totals.taxableValue
+  const cgstAmount = totals.cgstAmount
+  const sgstAmount = totals.sgstAmount
   const cashRec = parseFloat(cashReceived) || 0
+  const shortBy = paymentMethod === 'CASH' ? Math.max(0, grandTotal - cashRec) : 0
   const change = paymentMethod === 'CASH' ? Math.max(0, cashRec - grandTotal) : 0
   const canPay = grandTotal > 0 && (paymentMethod !== 'CASH' || cashRec >= grandTotal)
 
@@ -496,21 +538,28 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
   }, [customerSearch, searchCustomers])
 
   const handleAddCustomer = async () => {
-    if (!newCustomerName.trim() || !newCustomerPhone.trim()) {
-      setNewCustomerError('Name and phone are required.')
-      return
-    }
+    // Same rules the server enforces, so the cashier finds out about a bad
+    // number before the round trip rather than after it.
+    const nameCheck = validateName(newCustomerName, 'Customer name')
+    if (!nameCheck.ok) { setNewCustomerError(nameCheck.message); return }
+    const phoneCheck = validateMobile(newCustomerPhone)
+    if (!phoneCheck.ok) { setNewCustomerError(phoneCheck.message); return }
+
     try {
       const d = await apiFetch<{ customer: Customer }>('/api/v1/customers', {
         method: 'POST',
-        body: JSON.stringify({ name: newCustomerName.trim(), phone: newCustomerPhone.trim() })
+        body: JSON.stringify({ name: nameCheck.value, phone: phoneCheck.value })
       })
       setCustomer(d.customer)
       setShowCustomerModal(false)
       resetCustomerModal()
     } catch (err: unknown) {
-      const e = err as { data?: { error?: string } }
-      setNewCustomerError(e.data?.error === 'PHONE_ALREADY_EXISTS' ? 'Phone already exists.' : 'Failed to add customer.')
+      const e = err as { data?: { error?: string; message?: string } }
+      if (e.data?.error === 'PHONE_ALREADY_EXISTS') {
+        setNewCustomerError('A customer with this phone number already exists.')
+      } else {
+        setNewCustomerError(e.data?.message || 'Could not add the customer.')
+      }
     }
   }
 
@@ -583,16 +632,26 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
           subtotal,
           gstAmount: totalGst,
           discountAmount: billDiscAmt,
+          taxableValue,
+          cgstAmount,
+          sgstAmount,
+          igstAmount: 0,
           amountReceived: paymentMethod === 'CASH' ? cashRec : null,
           changeGiven: paymentMethod === 'CASH' ? Math.max(0, cashRec - grandTotal) : null,
           paymentMethod,
           customer: customer ? { name: customer.name } : null,
-          items: cartItems.map((it) => ({
+          items: cartItems.map((it, i) => ({
             productName: it.productName,
             itemCode: it.itemCode,
             quantity: it.quantity,
             unitRate: it.unitRate,
-            lineTotal: it.lineTotal
+            lineTotal: it.lineTotal,
+            gstPercentage: it.gstPercentage,
+            taxableValue: totals.lines[i]?.taxableValue,
+            cgstAmount: totals.lines[i]?.cgstAmount,
+            sgstAmount: totals.lines[i]?.sgstAmount,
+            igstAmount: totals.lines[i]?.igstAmount,
+            billDiscountAmt: totals.lines[i]?.billDiscountAmt
           })),
           synced: false
         })
@@ -606,6 +665,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
 
   const startNewBill = () => {
     setCartItems([])
+    setQtyDraft(null)
     setCustomer(null)
     setBillDiscountFlat('')
     setBillDiscountPct('')
@@ -956,7 +1016,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                         type="button"
                         disabled={outOfStock}
                         onClick={() => selectProduct(p)}
-                        className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors border-b last:border-b-0 ${outOfStock ? 'opacity-40 cursor-not-allowed bg-zinc-50' : 'hover:bg-zinc-50 cursor-pointer'}`}
+                        className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors border-b last:border-b-0 ${outOfStock ? 'cursor-not-allowed bg-zinc-50/70' : 'hover:bg-zinc-50 cursor-pointer'}`}
                       >
                         <div className="min-w-0">
                           <p className="font-medium text-zinc-900 text-sm truncate">{p.name}</p>
@@ -1146,11 +1206,29 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                 <span>{cartItems.length} item{cartItems.length !== 1 ? 's' : ''}</span>
                 <span>₹{fmt(subtotal)}</span>
               </div>
-              {totalGst > 0 && (
-                <div className="flex justify-between text-muted-foreground text-xs">
-                  <span>Incl. GST</span>
-                  <span>₹{fmt(totalGst)}</span>
+              {billDiscAmt > 0 && (
+                <div className="flex justify-between text-emerald-600">
+                  <span>Discount</span>
+                  <span>−₹{fmt(billDiscAmt)}</span>
                 </div>
+              )}
+              {/* Rates are GST-inclusive, so tax is extracted from the total
+                  rather than added to it. */}
+              <div className="flex justify-between text-muted-foreground">
+                <span>Taxable value</span>
+                <span>₹{fmt(taxableValue)}</span>
+              </div>
+              {totalGst > 0 && (
+                <>
+                  <div className="flex justify-between text-muted-foreground text-xs">
+                    <span>CGST</span>
+                    <span>₹{fmt(cgstAmount)}</span>
+                  </div>
+                  <div className="flex justify-between text-muted-foreground text-xs">
+                    <span>SGST</span>
+                    <span>₹{fmt(sgstAmount)}</span>
+                  </div>
+                </>
               )}
             </div>
 
@@ -1182,8 +1260,8 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                   <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">%</span>
                 </div>
               </div>
-              {billDiscAmt > 0 && (
-                <p className="text-xs text-emerald-600 mt-1.5">−₹{fmt(billDiscAmt)} discount applied</p>
+              {billDiscAmt > 0 && billDiscPct > 0 && (
+                <p className="text-xs text-emerald-600 mt-1.5">{billDiscPct}% → −₹{fmt(billDiscAmt)}</p>
               )}
             </div>
 
@@ -1238,10 +1316,15 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                   </div>
                 </div>
                 {cashRec > 0 && (
-                  <div className={`flex items-center justify-between p-2.5 rounded-lg text-sm font-semibold ${change >= 0 ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`}>
-                    <span>{change >= 0 ? 'Change to Return' : 'Amount Short'}</span>
-                    <span>₹{fmt(Math.abs(cashRec < grandTotal ? cashRec - grandTotal : change))}</span>
+                  <div className={`flex items-center justify-between p-2.5 rounded-lg text-sm font-semibold ${shortBy > 0 ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-800'}`}>
+                    <span>{shortBy > 0 ? 'Short by' : 'Change to return'}</span>
+                    <span>₹{fmt(shortBy > 0 ? shortBy : change)}</span>
                   </div>
+                )}
+                {shortBy > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Part payment isn&apos;t available yet — collect the full amount to continue.
+                  </p>
                 )}
                 {grandTotal > 0 && (
                   <div className="flex gap-1 flex-wrap">
@@ -1291,6 +1374,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                 onClick={() => {
                   if (cartItems.length === 0 || confirm('Clear the current bill?')) {
                     setCartItems([])
+                    setQtyDraft(null)
                     setBillDiscountFlat('')
                     setBillDiscountPct('')
                     setCashReceived('')
@@ -1381,7 +1465,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                   <label className="block text-xs font-semibold mb-1">Name *</label>
                   <Input
                     value={newCustomerName}
-                    onChange={(e) => setNewCustomerName(e.target.value)}
+                    onChange={(e) => { setNewCustomerName(e.target.value); setNewCustomerError('') }}
                     placeholder="Customer name"
                     className="h-9"
                     autoFocus
@@ -1391,9 +1475,9 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                   <label className="block text-xs font-semibold mb-1">Phone *</label>
                   <Input
                     value={newCustomerPhone}
-                    onChange={(e) => setNewCustomerPhone(e.target.value)}
-                    placeholder="Mobile number"
-                    className="h-9"
+                    onChange={(e) => { setNewCustomerPhone(e.target.value); setNewCustomerError('') }}
+                    placeholder="98765 43210"
+                    className="h-9 font-mono"
                   />
                 </div>
                 {newCustomerError && (
