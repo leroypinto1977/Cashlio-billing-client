@@ -96,14 +96,26 @@ const api = {
   db
 }
 
+/**
+ * The renderer reaches the main process only through channels named here.
+ *
+ * A blanket `invoke` passes whatever string the page hands it, which turns
+ * every handler the main process registers — including the ones that write to
+ * the local database — into part of the page's attack surface. The renderer
+ * shows names, notes and product descriptions typed by other people; keeping
+ * this list explicit means a script that got in could still only call things
+ * we chose to expose.
+ */
+const INVOKE_CHANNELS = ['get-mac-address', 'print-receipt'] as const
+
 const electronStub = {
   ipcRenderer: {
-    send: (channel: string, ...args: unknown[]) => ipcRenderer.send(channel, ...args),
-    invoke: (channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args),
-    on: (
-      channel: string,
-      listener: (event: Electron.IpcRendererEvent, ...args: unknown[]) => void
-    ) => ipcRenderer.on(channel, listener)
+    invoke: (channel: string, ...args: unknown[]) => {
+      if (!(INVOKE_CHANNELS as readonly string[]).includes(channel)) {
+        return Promise.reject(new Error(`IPC channel not exposed: ${channel}`))
+      }
+      return ipcRenderer.invoke(channel, ...args)
+    }
   }
 }
 

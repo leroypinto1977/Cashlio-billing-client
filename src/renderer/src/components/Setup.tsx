@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { Server, Settings, CheckCircle, AlertTriangle, Monitor } from 'lucide-react'
+import { Server, Settings, CheckCircle, AlertTriangle, Monitor, ShieldCheck } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from './ui/card'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
@@ -15,6 +15,11 @@ export default function Setup() {
     (import.meta.env.VITE_DEFAULT_SERVER_PORT as string) || '52001'
   )
   const [terminalName, setTerminalName] = useState('')
+  // Admitting a till to the branch is a manager's decision, not something
+  // anyone who can reach the server may do. Asked for once, used once, and
+  // never written down.
+  const [adminUser, setAdminUser] = useState('')
+  const [adminPass, setAdminPass] = useState('')
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const navigate = useNavigate()
@@ -32,19 +37,24 @@ export default function Setup() {
 
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!ipAddress || !terminalName) return
+    if (!ipAddress || !terminalName || !adminUser || !adminPass) return
 
     setStatus('loading')
     setErrorMessage('')
 
     try {
-      const macAddress: string = await window.electron.ipcRenderer.invoke('get-mac-address')
+      const macAddress = (await window.electron.ipcRenderer.invoke('get-mac-address')) as string
       const serverUrl = `http://${ipAddress}:${port}`
 
-      const response = await axios.post(`${serverUrl}/api/v1/system/pair-client`, {
-        macAddress,
-        friendlyName: terminalName
+      const auth = await axios.post(`${serverUrl}/api/v1/auth/login`, {
+        username: adminUser,
+        password: adminPass
       })
+      const response = await axios.post(
+        `${serverUrl}/api/v1/system/pair-client`,
+        { macAddress, friendlyName: terminalName },
+        { headers: { Authorization: `Bearer ${auth.data.token}` } }
+      )
 
       if (response.status === 200) {
         setStatus('success')
@@ -69,9 +79,15 @@ export default function Setup() {
     } catch (error: any) {
       console.error('Connection failed:', error)
       setStatus('error')
+      const code = error.response?.data?.error
       setErrorMessage(
-        error.response?.data?.error ||
-          'Could not connect to the Main Server. Please check the IP address and ensure the server is running.'
+        code === 'INVALID_CREDENTIALS'
+          ? 'That manager username or password was not accepted.'
+          : code === 'FORBIDDEN'
+            ? 'That account cannot add terminals. Sign in as a super admin.'
+            : error.response?.data?.message ||
+              code ||
+              'Could not connect to the Main Server. Please check the IP address and ensure the server is running.'
       )
     }
   }
@@ -165,6 +181,34 @@ export default function Setup() {
                 </p>
               </div>
             </div>
+
+              <div className="space-y-2 pt-2 border-t border-zinc-100">
+                <Label className="text-sm font-medium text-zinc-900 ml-1 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-zinc-400" />
+                  Manager authorisation
+                </Label>
+                <Input
+                  id="adminUser"
+                  type="text"
+                  placeholder="Super admin username"
+                  value={adminUser}
+                  onChange={(e) => setAdminUser(e.target.value)}
+                  className="bg-white border-zinc-200 text-zinc-900 focus-visible:ring-zinc-900 focus-visible:ring-2 rounded-md h-10"
+                  required
+                />
+                <Input
+                  id="adminPass"
+                  type="password"
+                  placeholder="Password"
+                  value={adminPass}
+                  onChange={(e) => setAdminPass(e.target.value)}
+                  className="bg-white border-zinc-200 text-zinc-900 focus-visible:ring-zinc-900 focus-visible:ring-2 rounded-md h-10"
+                  required
+                />
+                <p className="text-xs text-zinc-500 mt-1 ml-1">
+                  Needed once, to add this terminal to the branch. It is not stored.
+                </p>
+              </div>
 
             {status === 'error' && (
               <Alert
