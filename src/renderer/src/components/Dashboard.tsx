@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ShoppingCart, LogOut, Monitor, Wifi, WifiOff, Clock, AlertCircle } from 'lucide-react'
+import { ShoppingCart, LogOut, Monitor, Wifi, WifiOff, Clock, AlertCircle, RotateCcw } from 'lucide-react'
 import { Button } from './ui/button'
 import BillingScreen from './BillingScreen'
+import ReturnsScreen from './ReturnsScreen'
+
+type Tab = 'billing' | 'returns'
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -11,6 +14,7 @@ export default function Dashboard() {
   const [serverAddress, setServerAddress] = useState('')
   const [currentTime, setCurrentTime] = useState(new Date())
   const [pendingBills, setPendingBills] = useState(0)
+  const [tab, setTab] = useState<Tab>('billing')
 
   useEffect(() => {
     const token = localStorage.getItem('cashierToken')
@@ -51,6 +55,32 @@ export default function Dashboard() {
             <Monitor className="w-3.5 h-3.5" />
             <span>{terminalName}</span>
           </div>
+
+          {/* Billing / Returns switch — big enough to hit on a touch till. */}
+          <div className="flex items-center gap-1 ml-3 p-1 rounded-xl bg-zinc-100 border border-zinc-200">
+            <button
+              type="button"
+              onClick={() => setTab('billing')}
+              className={`flex items-center gap-2 h-10 px-5 rounded-lg text-sm font-semibold transition-colors ${
+                tab === 'billing'
+                  ? 'bg-white text-zinc-900 shadow-sm'
+                  : 'text-zinc-500 hover:text-zinc-800'
+              }`}
+            >
+              <ShoppingCart className="w-4 h-4" /> Billing
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab('returns')}
+              className={`flex items-center gap-2 h-10 px-5 rounded-lg text-sm font-semibold transition-colors ${
+                tab === 'returns'
+                  ? 'bg-white text-zinc-900 shadow-sm'
+                  : 'text-zinc-500 hover:text-zinc-800'
+              }`}
+            >
+              <RotateCcw className="w-4 h-4" /> Returns
+            </button>
+          </div>
         </div>
 
         <div className="flex items-center gap-6">
@@ -88,9 +118,25 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Main content — billing screen */}
+      {/* Main content.
+
+          BillingScreen stays mounted whichever tab is showing and is hidden
+          with CSS instead. Its cart, attached customer, discounts and typed
+          tender amounts all live in component state, so unmounting it to show
+          Returns would silently throw away a half-built sale — a cashier
+          nipping over to process a return mid-basket would come back to an
+          empty till. Keeping it mounted also keeps its offline sync worker and
+          `onPendingCountChange` wiring alive, so the pending-bill badge in the
+          header stays accurate while the cashier is on the Returns tab.
+
+          ReturnsScreen is mounted on demand: it holds nothing worth preserving
+          between visits, and a fresh mount is exactly the "start again" state
+          the next return wants. */}
       <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        <BillingScreen onPendingCountChange={setPendingBills} />
+        <div className={`flex-1 flex flex-col min-h-0 ${tab === 'billing' ? '' : 'hidden'}`}>
+          <BillingScreen onPendingCountChange={setPendingBills} />
+        </div>
+        {tab === 'returns' && <ReturnsScreen />}
       </main>
     </div>
   )
