@@ -797,7 +797,12 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
       })),
       discountAmount: billDiscAmt,
       payments: paidTenders,
-      clientLocalId: localId
+      clientLocalId: localId,
+      // Stamped here, at the counter. An offline bill can sit in the queue
+      // until the network comes back, and dating it on arrival would put the
+      // takings on the wrong day and age the customer's credit from the wrong
+      // date. The server sanity-checks this against its own clock.
+      soldAt: new Date().toISOString()
     }
     if (localBillNumber) body.billNumber = localBillNumber
     try {
