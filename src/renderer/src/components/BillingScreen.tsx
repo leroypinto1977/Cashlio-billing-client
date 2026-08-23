@@ -1022,7 +1022,12 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
         const cursor = (await window.api.db.sync.get('pull_cursor')) || '0'
         let resp: {
           events: Array<{
-            id: string; entity: string; entityId: string; op: string; payload: unknown
+            id: string
+            cursor?: string
+            entity: string
+            entityId: string
+            op: string
+            payload: unknown
           }>
           nextCursor: string
           hasMore: boolean
@@ -1035,7 +1040,9 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
         }
         if (!resp.events || resp.events.length === 0) break
         const result = await window.api.db.sync.applyEvents(resp.events)
-        if (result.lastId) await window.api.db.sync.set('pull_cursor', result.lastId)
+        // Store the server's own resume token, not the row id — it pages by
+        // commit order, which the id does not describe.
+        if (result.lastCursor) await window.api.db.sync.set('pull_cursor', result.lastCursor)
         if (result.stoppedAt) {
           // An event refused to apply. The cursor is parked before it, so
           // looping would just hit the same row again — stop and let the next

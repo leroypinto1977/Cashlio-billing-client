@@ -57,6 +57,7 @@ export type CashlioApi = {
       applyEvents: (events: unknown[]) => Promise<{
         applied: number
         lastId: string | null
+        lastCursor: string | null
         stoppedAt: string | null
         error: string | null
       }>

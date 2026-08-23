@@ -81,6 +81,7 @@ const db = {
       ipcRenderer.invoke('db:sync:apply-events', events) as Promise<{
         applied: number
         lastId: string | null
+        lastCursor: string | null
         stoppedAt: string | null
         error: string | null
       }>,

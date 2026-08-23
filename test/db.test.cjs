@@ -173,6 +173,7 @@ console.log('\n— sync mirror —')
   ])
   eq('all three events applied', res.applied, 3)
   eq('cursor is the last id', res.lastId, '3')
+  eq('an event without a cursor token falls back to its id', res.lastCursor, '3')
   eq('product is searchable by name', db.searchProducts('copper').length, 1)
   eq('product is findable by item code', db.getProductByItemCode('PIPE-01').itemCode, 'PIPE-01')
   eq('customer is searchable by phone', db.searchCustomers('900000').length, 1)
@@ -207,12 +208,13 @@ console.log('\n— a broken event must not be stepped over —')
           WHEN NEW.id = 'poison'
           BEGIN SELECT RAISE(ABORT, 'poisoned'); END`)
   const res = db.applySyncEvents([
-    { id: '10', entity: 'product', entityId: 'ok1', op: 'upsert', payload: { itemCode: 'A', name: 'First' } },
-    { id: '11', entity: 'product', entityId: 'poison', op: 'upsert', payload: { itemCode: 'B', name: 'Bad' } },
-    { id: '12', entity: 'product', entityId: 'ok2', op: 'upsert', payload: { itemCode: 'C', name: 'Third' } }
+    { id: '10', cursor: '900:10', entity: 'product', entityId: 'ok1', op: 'upsert', payload: { itemCode: 'A', name: 'First' } },
+    { id: '11', cursor: '900:11', entity: 'product', entityId: 'poison', op: 'upsert', payload: { itemCode: 'B', name: 'Bad' } },
+    { id: '12', cursor: '901:12', entity: 'product', entityId: 'ok2', op: 'upsert', payload: { itemCode: 'C', name: 'Third' } }
   ])
   eq('only the events before the break applied', res.applied, 1)
   eq('the cursor stays on the last good event', res.lastId, '10')
+  eq('...as a resume token too', res.lastCursor, '900:10')
   eq('the failing event is named', res.stoppedAt, '11')
   t('the reason is reported', typeof res.error === 'string' && res.error.length > 0, res.error)
   eq('nothing after the break was applied', db.getProductByItemCode('C'), null)

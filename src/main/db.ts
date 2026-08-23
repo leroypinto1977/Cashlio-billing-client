@@ -425,6 +425,9 @@ export function searchCustomers(query: string, limit = 20): unknown[] {
 
 export type SyncEventInput = {
   id: string
+  /** Opaque resume token for this event. The server pages by commit order,
+   *  not by id, so this — not `id` — is what gets stored as the cursor. */
+  cursor?: string
   entity: 'product' | 'customer' | 'bill' | string
   entityId: string
   op: 'upsert' | 'delete' | string
@@ -436,6 +439,9 @@ export type SyncEventInput = {
  * that actually landed, so the caller advances its cursor only over work that
  * succeeded.
  *
+ * `lastCursor` is the resume token to persist; it lags `lastId` in meaning
+ * only in that the server, not the terminal, decides what a cursor looks like.
+ *
  * `stoppedAt` is set when an event could not be applied. The batch stops there
  * rather than stepping over it: the cursor would otherwise move past an event
  * that never took effect, and that row would never be offered again — a
@@ -445,10 +451,12 @@ export type SyncEventInput = {
 export function applySyncEvents(events: SyncEventInput[]): {
   applied: number
   lastId: string | null
+  lastCursor: string | null
   stoppedAt: string | null
   error: string | null
 } {
-  if (events.length === 0) return { applied: 0, lastId: null, stoppedAt: null, error: null }
+  if (events.length === 0)
+    return { applied: 0, lastId: null, lastCursor: null, stoppedAt: null, error: null }
   const d = getDb()
   const upsertProduct = d.prepare(
     `INSERT INTO products
@@ -487,6 +495,7 @@ export function applySyncEvents(events: SyncEventInput[]): {
 
   let applied = 0
   let lastId: string | null = null
+  let lastCursor: string | null = null
   let stoppedAt: string | null = null
   let error: string | null = null
 
@@ -544,6 +553,8 @@ export function applySyncEvents(events: SyncEventInput[]): {
         // never heard of. Those are safe to step over; broken ones are not.
         applied++
         lastId = ev.id
+        // Older servers send no cursor; their ids are the cursor.
+        lastCursor = ev.cursor ?? ev.id
       } catch (e) {
         console.warn('[sync] failed to apply event', ev.id, ev.entity, ev.op, e)
         stoppedAt = ev.id
@@ -553,7 +564,7 @@ export function applySyncEvents(events: SyncEventInput[]): {
     }
   })
   tx(events)
-  return { applied, lastId, stoppedAt, error }
+  return { applied, lastId, lastCursor, stoppedAt, error }
 }
 
 // ─── Sync state (key/value) ─────────────────────────────────────────────────
