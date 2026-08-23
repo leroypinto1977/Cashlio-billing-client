@@ -989,9 +989,19 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
     if (ts && Date.now() - ts < PRODUCT_CACHE_TTL_MS) return
     cachingRef.current = true
     try {
-      const data = await apiFetch<{ products: Product[] }>('/api/v1/products?isActive=true&limit=1000')
+      // Paged, and without the batch lists — this used to ask for the whole
+      // catalogue with every batch attached, once an hour, from every till.
+      // The server holds a page at a time now, and so does this.
+      const all: Product[] = []
+      for (let offset = 0; offset < 20_000; offset += 200) {
+        const data = await apiFetch<{ products: Product[]; hasMore: boolean }>(
+          `/api/v1/products?isActive=true&slim=true&limit=200&offset=${offset}`
+        )
+        all.push(...data.products)
+        if (!data.hasMore || data.products.length === 0) break
+      }
       await window.api.db.product.replaceCache(
-        data.products as unknown as Array<Record<string, unknown>>
+        all as unknown as Array<Record<string, unknown>>
       )
     } catch {
       // Server unreachable — keep existing cache, will retry next hour
@@ -1038,7 +1048,12 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
           hasMore: boolean
         }
         try {
-          resp = await apiFetch(`/api/v1/sync/pull?cursor=${encodeURIComponent(cursor)}&limit=500`)
+          // deviceId lets the branch server know how far this till has read,
+          // which is what makes trimming the change log safe.
+          resp = await apiFetch(
+            `/api/v1/sync/pull?cursor=${encodeURIComponent(cursor)}&limit=500` +
+              (deviceId ? `&deviceId=${encodeURIComponent(deviceId)}` : '')
+          )
         } catch {
           // Server unreachable — try again on next tick.
           break
