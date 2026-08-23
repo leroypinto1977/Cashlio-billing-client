@@ -1,5 +1,5 @@
-appId: com.electron.app
-productName: billing-client
+appId: com.cashlio.terminal
+productName: Cashlio Terminal
 directories:
   buildResources: build
 files:

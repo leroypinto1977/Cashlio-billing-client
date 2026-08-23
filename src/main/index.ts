@@ -24,6 +24,7 @@ import {
   peekLocalBillNumber
 } from './db'
 import type { SyncEventInput } from './db'
+import { appendFileSync } from 'fs'
 
 function getMacAddress(): string {
   const interfaces = os.networkInterfaces()
@@ -37,6 +38,23 @@ function getMacAddress(): string {
   }
   return 'UNKNOWN-MAC'
 }
+
+// A rejected promise in the main process terminates Electron under Node 20+.
+// On a till that means the app disappears mid-sale, taking the offline outbox
+// worker with it, and leaves nothing behind explaining why.
+function logCrash(kind: string, err: unknown): void {
+  const line = `[${new Date().toISOString()}] ${kind}: ${
+    err instanceof Error ? (err.stack ?? err.message) : String(err)
+  }\n`
+  console.error(line)
+  try {
+    appendFileSync(join(app.getPath('userData'), 'crash.log'), line)
+  } catch {
+    // Logging must never be the thing that brings the till down.
+  }
+}
+process.on('unhandledRejection', (reason) => logCrash('unhandledRejection', reason))
+process.on('uncaughtException', (err) => logCrash('uncaughtException', err))
 
 function createWindow(): void {
   // Create the browser window.
@@ -59,7 +77,16 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    // Only hand real web links to the OS. Unfiltered, this would open
+    // file:// and smb:// URLs and any registered protocol handler.
+    try {
+      const { protocol } = new URL(details.url)
+      if (protocol === 'https:' || protocol === 'http:' || protocol === 'mailto:') {
+        shell.openExternal(details.url)
+      }
+    } catch {
+      // Not a URL we can parse; refuse it.
+    }
     return { action: 'deny' }
   })
 
@@ -78,7 +105,7 @@ function createWindow(): void {
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
   // Set app user model id for windows
-  app.setAppUserModelId('com.electron')
+  app.setAppUserModelId('com.cashlio.terminal')
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
