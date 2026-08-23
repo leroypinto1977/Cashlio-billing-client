@@ -16,6 +16,25 @@ const db = {
       }>
     >,
     countPending: () => ipcRenderer.invoke('db:bill:count-pending') as Promise<number>,
+    listFailed: () =>
+      ipcRenderer.invoke('db:bill:list-failed') as Promise<
+        Array<{
+          clientLocalId: string
+          payload: unknown
+          display: unknown
+          createdAt: number
+          attempts: number
+          lastError: string | null
+          status: string
+        }>
+      >,
+    countFailed: () => ipcRenderer.invoke('db:bill:count-failed') as Promise<number>,
+    retryFailed: (clientLocalId: string) =>
+      ipcRenderer.invoke('db:bill:retry-failed', clientLocalId) as Promise<{
+        ok: true
+        pending: number
+        failed: number
+      }>,
     remove: (clientLocalId: string) =>
       ipcRenderer.invoke('db:bill:remove', clientLocalId) as Promise<{
         ok: true
@@ -62,6 +81,8 @@ const db = {
       ipcRenderer.invoke('db:sync:apply-events', events) as Promise<{
         applied: number
         lastId: string | null
+        stoppedAt: string | null
+        error: string | null
       }>,
     get: (key: string) => ipcRenderer.invoke('db:sync:get', key) as Promise<string | null>,
     set: (key: string, value: string) =>

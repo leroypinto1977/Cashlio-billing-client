@@ -115,6 +115,17 @@ const PRODUCT_CACHE_TTL_MS = 60 * 60 * 1000  // 1 hour — legacy cache refresh 
 type PendingBillPayload = Record<string, unknown>
 type PendingBillDisplay = { grandTotal: number; paymentMethod: string; itemCount: number }
 
+// A queued bill the server rejected. `display` is whatever the till recorded
+// at the time of sale, so the row is readable even though the payload never
+// made it to the server.
+type FailedBill = {
+  clientLocalId: string
+  display: unknown
+  createdAt: number
+  attempts: number
+  lastError: string | null
+}
+
 // Phase 3D: local mirror is authoritative when offline. The legacy
 // product_cache (1-hour TTL) is kept as a fallback for terminals that haven't
 // re-paired post-3D and therefore have an empty mirror.
@@ -306,6 +317,11 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
 
   // Offline sync — counts come from SQLite, populated async.
   const [pendingCount, setPendingCount] = useState(0)
+  // Bills the branch server rejected outright. They stop retrying, so unless
+  // the till says so nobody ever learns that a sale never reached the books.
+  const [failedBills, setFailedBills] = useState<FailedBill[]>([])
+  const [showFailedModal, setShowFailedModal] = useState(false)
+  const [retryingId, setRetryingId] = useState<string | null>(null)
   const syncingRef = useRef(false)
   const latestSyncRef = useRef<(() => Promise<void>) | undefined>(undefined)
 
@@ -888,6 +904,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
       const c = await window.api.db.bill.countPending()
       setPendingCount(c)
       onPendingCountChange?.(c)
+      setFailedBills(await window.api.db.bill.listFailed())
       return
     }
     syncingRef.current = true
@@ -912,9 +929,11 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
           if (e.status >= 400 && e.status < 500) {
             // 4xx: permanent rejection (e.g. product removed). Mark failed_permanent
             // rather than silently dropping — preserves the audit trail.
+            // Keep the server's own reason. "HTTP_400" tells the shop nothing;
+            // "INSUFFICIENT_STOCK" tells them exactly what to go and fix.
             await window.api.db.bill.markFailed({
               clientLocalId: entry.clientLocalId,
-              error: `HTTP_${e.status}`
+              error: e.message ? `${e.message} (HTTP ${e.status})` : `HTTP_${e.status}`
             })
           } else {
             await window.api.db.bill.markAttempted({
@@ -930,6 +949,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
       const remaining = await window.api.db.bill.countPending()
       setPendingCount(remaining)
       onPendingCountChange?.(remaining)
+      setFailedBills(await window.api.db.bill.listFailed())
     }
   }
 
@@ -945,6 +965,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
       const c = await window.api.db.bill.countPending()
       setPendingCount(c)
       onPendingCountChange?.(c)
+      setFailedBills(await window.api.db.bill.listFailed())
       latestSyncRef.current?.()
     })()
     const id = setInterval(() => latestSyncRef.current?.(), 30_000)
@@ -1015,6 +1036,13 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
         if (!resp.events || resp.events.length === 0) break
         const result = await window.api.db.sync.applyEvents(resp.events)
         if (result.lastId) await window.api.db.sync.set('pull_cursor', result.lastId)
+        if (result.stoppedAt) {
+          // An event refused to apply. The cursor is parked before it, so
+          // looping would just hit the same row again — stop and let the next
+          // tick try once, rather than spinning twenty times a minute.
+          console.warn('[sync] pull stalled at event', result.stoppedAt, result.error)
+          break
+        }
         if (!resp.hasMore) break
       }
     } finally {
@@ -1147,6 +1175,17 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
               >
                 <AlertCircle className="w-3 h-3" />
                 {pendingCount} pending sync
+              </button>
+            )}
+            {failedBills.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowFailedModal(true)}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full hover:bg-red-100 transition-colors"
+                title="These sales were rejected and are not in the books"
+              >
+                <AlertCircle className="w-3 h-3" />
+                {failedBills.length} rejected
               </button>
             )}
           </div>
@@ -1664,6 +1703,71 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
           </div>
         </div>
       </div>
+
+      {/* Rejected bills. These sales exist on this till and nowhere else:
+          the server refused them and the queue stopped retrying. Somebody has
+          to reconcile each one by hand, so the till has to name them. */}
+      <Modal
+        open={showFailedModal}
+        onClose={() => setShowFailedModal(false)}
+        title="Rejected sales"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+            These bills were taken on this till but the branch server refused
+            them, so they are <span className="font-semibold">not in the books</span>.
+            Fix the cause and retry, or note them down and tell the manager.
+          </div>
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {failedBills.map((b) => {
+              const d = (b.display ?? {}) as Partial<PendingBillDisplay>
+              return (
+                <div key={b.clientLocalId} className="p-3 rounded-lg border bg-white">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-zinc-900">
+                        ₹{fmt(Number(d.grandTotal ?? 0))}
+                        <span className="ml-2 font-normal text-xs text-muted-foreground">
+                          {d.itemCount ?? 0} item{d.itemCount === 1 ? '' : 's'} · {d.paymentMethod ?? '—'}
+                        </span>
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {new Date(b.createdAt).toLocaleString('en-IN')} · {b.attempts} attempt
+                        {b.attempts === 1 ? '' : 's'}
+                      </p>
+                      <p className="text-xs font-mono text-red-700 mt-1 break-words">
+                        {b.lastError ?? 'Rejected'}
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      className="h-8 text-xs shrink-0"
+                      disabled={retryingId === b.clientLocalId}
+                      onClick={async () => {
+                        setRetryingId(b.clientLocalId)
+                        try {
+                          await window.api.db.bill.retryFailed(b.clientLocalId)
+                          await syncPendingBills()
+                        } finally {
+                          setRetryingId(null)
+                        }
+                      }}
+                    >
+                      {retryingId === b.clientLocalId ? 'Retrying…' : 'Retry'}
+                    </Button>
+                  </div>
+                </div>
+              )
+            })}
+            {failedBills.length === 0 && (
+              <p className="text-sm text-muted-foreground text-center py-4">
+                Nothing rejected. Every sale reached the server.
+              </p>
+            )}
+          </div>
+        </div>
+      </Modal>
 
       {/* Customer Modal */}
       <Modal

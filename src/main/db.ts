@@ -221,6 +221,64 @@ export function countPendingBills(): number {
   return r.c
 }
 
+/**
+ * Bills the server refused outright. These are *not* pending: retrying them
+ * verbatim will fail forever, so the sync worker parks them here. Somebody
+ * has to look at each one and decide — which they cannot do if nothing on
+ * the till ever shows them, so these are read back separately and surfaced.
+ */
+export function listFailedBills(): PendingBillRow[] {
+  const d = getDb()
+  const rows = d
+    .prepare(
+      `SELECT client_local_id, payload_json, display_json, created_at,
+              attempts, last_error, status
+         FROM pending_bills
+         WHERE status = 'failed_permanent'
+         ORDER BY created_at ASC`
+    )
+    .all() as Array<{
+    client_local_id: string
+    payload_json: string
+    display_json: string
+    created_at: number
+    attempts: number
+    last_error: string | null
+    status: string
+  }>
+  return rows.map((r) => ({
+    clientLocalId: r.client_local_id,
+    payload: safeParse(r.payload_json),
+    display: safeParse(r.display_json),
+    createdAt: r.created_at,
+    attempts: r.attempts,
+    lastError: r.last_error,
+    status: r.status
+  }))
+}
+
+export function countFailedBills(): number {
+  const d = getDb()
+  const r = d
+    .prepare(`SELECT COUNT(*) AS c FROM pending_bills WHERE status = 'failed_permanent'`)
+    .get() as { c: number }
+  return r.c
+}
+
+/**
+ * Put a parked bill back in the queue. Worth doing once the cause is gone —
+ * a product re-stocked, a licence renewed — and the attempt counter is reset
+ * so the retry gets a full run of tries rather than one.
+ */
+export function retryFailedBill(clientLocalId: string): void {
+  const d = getDb()
+  d.prepare(
+    `UPDATE pending_bills
+        SET status = 'pending', attempts = 0, last_error = NULL
+      WHERE client_local_id = ? AND status = 'failed_permanent'`
+  ).run(clientLocalId)
+}
+
 export function removePendingBill(clientLocalId: string): void {
   const d = getDb()
   d.prepare(`DELETE FROM pending_bills WHERE client_local_id = ?`).run(clientLocalId)
@@ -374,11 +432,23 @@ export type SyncEventInput = {
 }
 
 /**
- * Apply a batch of pulled events atomically. Returns the highest id seen so
- * the caller can persist a cursor only after the batch commits.
+ * Apply a batch of pulled events atomically. Returns the id of the last event
+ * that actually landed, so the caller advances its cursor only over work that
+ * succeeded.
+ *
+ * `stoppedAt` is set when an event could not be applied. The batch stops there
+ * rather than stepping over it: the cursor would otherwise move past an event
+ * that never took effect, and that row would never be offered again — a
+ * product price or a voided bill silently wrong on this till forever. A stuck
+ * cursor is a visible problem; a skipped one is not.
  */
-export function applySyncEvents(events: SyncEventInput[]): { applied: number; lastId: string | null } {
-  if (events.length === 0) return { applied: 0, lastId: null }
+export function applySyncEvents(events: SyncEventInput[]): {
+  applied: number
+  lastId: string | null
+  stoppedAt: string | null
+  error: string | null
+} {
+  if (events.length === 0) return { applied: 0, lastId: null, stoppedAt: null, error: null }
   const d = getDb()
   const upsertProduct = d.prepare(
     `INSERT INTO products
@@ -417,10 +487,11 @@ export function applySyncEvents(events: SyncEventInput[]): { applied: number; la
 
   let applied = 0
   let lastId: string | null = null
+  let stoppedAt: string | null = null
+  let error: string | null = null
 
   const tx = d.transaction((batch: SyncEventInput[]) => {
     for (const ev of batch) {
-      lastId = ev.id
       try {
         if (ev.entity === 'product') {
           if (ev.op === 'delete') {
@@ -468,16 +539,21 @@ export function applySyncEvents(events: SyncEventInput[]): { applied: number; la
             })
           }
         }
-        // Unknown entity types are silently skipped — forward-compat with
-        // future server versions emitting events the terminal doesn't know.
+        // Unknown entity types are skipped rather than treated as failures —
+        // forward-compat with a newer server emitting events this build has
+        // never heard of. Those are safe to step over; broken ones are not.
         applied++
+        lastId = ev.id
       } catch (e) {
         console.warn('[sync] failed to apply event', ev.id, ev.entity, ev.op, e)
+        stoppedAt = ev.id
+        error = e instanceof Error ? e.message : String(e)
+        break
       }
     }
   })
   tx(events)
-  return { applied, lastId }
+  return { applied, lastId, stoppedAt, error }
 }
 
 // ─── Sync state (key/value) ─────────────────────────────────────────────────

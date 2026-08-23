@@ -21,6 +21,11 @@ export type CashlioApi = {
       }) => Promise<{ ok: true; count: number }>
       listPending: () => Promise<PendingBillRow[]>
       countPending: () => Promise<number>
+      listFailed: () => Promise<PendingBillRow[]>
+      countFailed: () => Promise<number>
+      retryFailed: (
+        clientLocalId: string
+      ) => Promise<{ ok: true; pending: number; failed: number }>
       remove: (clientLocalId: string) => Promise<{ ok: true; count: number }>
       markAttempted: (input: {
         clientLocalId: string
@@ -52,6 +57,8 @@ export type CashlioApi = {
       applyEvents: (events: unknown[]) => Promise<{
         applied: number
         lastId: string | null
+        stoppedAt: string | null
+        error: string | null
       }>
       get: (key: string) => Promise<string | null>
       set: (key: string, value: string) => Promise<{ ok: true }>

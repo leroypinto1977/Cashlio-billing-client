@@ -6,6 +6,9 @@ import {
   getDb,
   enqueuePendingBill,
   listPendingBills,
+  listFailedBills,
+  countFailedBills,
+  retryFailedBill,
   countPendingBills,
   removePendingBill,
   markPendingBillAttempted,
@@ -132,6 +135,12 @@ app.whenReady().then(() => {
   )
   ipcMain.handle('db:bill:list-pending', () => listPendingBills())
   ipcMain.handle('db:bill:count-pending', () => countPendingBills())
+  ipcMain.handle('db:bill:list-failed', () => listFailedBills())
+  ipcMain.handle('db:bill:count-failed', () => countFailedBills())
+  ipcMain.handle('db:bill:retry-failed', (_e, clientLocalId: string) => {
+    retryFailedBill(clientLocalId)
+    return { ok: true, pending: countPendingBills(), failed: countFailedBills() }
+  })
   ipcMain.handle('db:bill:remove', (_e, clientLocalId: string) => {
     removePendingBill(clientLocalId)
     return { ok: true, count: countPendingBills() }
