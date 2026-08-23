@@ -9,6 +9,7 @@ import { Input } from './ui/input'
 import { Modal } from './ui/modal'
 import { printReceipt, type ReceiptBill, type ReceiptShop } from '../lib/receipt'
 import { computeInvoiceTotals } from '@shared/money'
+import { stateCodeOf } from '@shared/validation'
 import { validateName, validateMobile } from '@shared/validation'
 import {
   isLengthMode, parseQty, qtyStep, roundQty, formatQty, formatQtyWithUnit,
@@ -69,6 +70,9 @@ type Customer = {
   creditLimit?: number
   creditDays?: number
   outstanding?: number
+  /** Decides the tax heads: a customer registered in another state is billed
+   *  IGST rather than CGST + SGST. */
+  gstin?: string | null
 }
 
 /** True when we actually know this customer's credit position. */
@@ -335,6 +339,10 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
 
   // Shop info (for receipt header)
   const [shopInfo, setShopInfo] = useState<ReceiptShop>({ name: 'My Shop' })
+  // The shop's own GST state. Needed at the counter, not just on the server:
+  // the receipt printed here has to name the same tax heads as the invoice
+  // that gets stored, or the customer's copy disagrees with the shop's books.
+  const [shopStateCode, setShopStateCode] = useState<string | null>(null)
 
   // Auto-print toggle (persisted)
   const [autoPrint, setAutoPrint] = useState<boolean>(() => isAutoPrintEnabled())
@@ -360,8 +368,9 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
     apiFetch<{
       shopName?: string; branchName?: string
       address?: string | null; phone?: string | null; gstin?: string | null
+      stateCode?: string | null
     }>('/api/v1/system/status')
-      .then((d) =>
+      .then((d) => {
         setShopInfo({
           name: d.shopName || 'My Shop',
           branch: d.branchName || null,
@@ -369,7 +378,8 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
           phone: d.phone ?? null,
           gstin: d.gstin ?? null
         })
-      )
+        setShopStateCode(d.stateCode ?? stateCodeOf(d.gstin))
+      })
       .catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -389,6 +399,18 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
     igstAmount: b.igstAmount,
     amountReceived: b.amountReceived ?? null,
     changeGiven: b.changeGiven,
+    // The settlement half of the bill. The receipt module has always rendered
+    // these; the payload simply never passed them, so a credit sale rung up
+    // at the counter — which is where credit sales actually happen — handed
+    // the customer a slip with no balance, no due date and no split-tender
+    // breakdown on it. The one copy they take home said nothing about what
+    // they still owe.
+    paidAmount: b.paidAmount,
+    balanceDue: b.balanceDue,
+    dueDate: b.dueDate ?? null,
+    status: b.status,
+    tenders: b.tenders,
+    customerOutstanding: b.customerOutstanding ?? null,
     customerName: b.customer?.name ?? null,
     cashierName,
     items: b.items.map((it) => ({
@@ -627,10 +649,19 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
   const billDiscPct = parseFloat(billDiscountPct) || 0
   // Same calculator the server uses, so an offline receipt printed at the
   // counter matches the invoice the server stores once the bill syncs.
+  // A customer registered in another state is billed IGST instead of
+  // CGST + SGST. This was hardcoded to intra-state, so an inter-state sale
+  // printed a receipt naming tax heads the stored invoice disagreed with —
+  // the shop's copy and the customer's copy of the same transaction claiming
+  // different things about the tax, which is exactly what a GST invoice is
+  // for. The server already gets this right; the counter now matches it.
+  const customerStateCode = stateCodeOf(customer?.gstin)
+  const interState =
+    shopStateCode != null && customerStateCode != null && customerStateCode !== shopStateCode
   const totals = computeInvoiceTotals(
     cartItems.map((it) => ({ lineTotal: it.lineTotal, gstPercentage: it.gstPercentage })),
     rawSubtotal * billDiscPct / 100 + billDiscFlat,
-    false
+    interState
   )
   const subtotal = totals.subtotal
   const billDiscAmt = totals.billDiscount
@@ -639,6 +670,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
   const taxableValue = totals.taxableValue
   const cgstAmount = totals.cgstAmount
   const sgstAmount = totals.sgstAmount
+  const igstAmount = totals.igstAmount
   const tenderList: Tender[] = tenderLines.map((t) => ({
     method: t.method,
     amount: parseFloat(t.amount) || 0,
@@ -810,7 +842,10 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
         method: 'POST',
         body: JSON.stringify(body)
       })
-      setSuccessBill({ ...d.bill, synced: true })
+      // The create response does not echo the payment rows, so the tenders
+      // are attached here — otherwise the receipt cannot show how a split
+      // payment was made up.
+      setSuccessBill({ ...d.bill, tenders: paidTenders, synced: true })
       // We're online — attempt to flush any pending offline bills
       setTimeout(() => latestSyncRef.current?.(), 200)
     } catch (err: unknown) {
@@ -847,7 +882,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
           taxableValue,
           cgstAmount,
           sgstAmount,
-          igstAmount: 0,
+          igstAmount,
           amountReceived: settlement.tendered > 0 ? settlement.tendered : null,
           changeGiven: settlement.changeGiven > 0 ? settlement.changeGiven : null,
           paidAmount: settlement.paidAmount,
