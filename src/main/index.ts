@@ -28,6 +28,7 @@ import {
   peekLocalBillNumber
 } from './db'
 import type { SyncEventInput } from './db'
+import { registerPrintingIpc } from './printing'
 import { appendFileSync } from 'fs'
 import tls from 'tls'
 import {
@@ -308,37 +309,7 @@ app.whenReady().then(() => {
   // hidden BrowserWindow and trigger printing. silent:false opens the OS
   // print dialog; pass deviceName via localStorage→arg in the future for
   // truly silent printing once a default printer is configured.
-  ipcMain.handle('print-receipt', async (_evt, payload: { html: string; billNumber?: string; deviceName?: string }) => {
-    const html = payload?.html ?? ''
-    if (!html) return { ok: false, error: 'NO_HTML' }
-    const printWin = new BrowserWindow({
-      show: false,
-      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false }
-    })
-    try {
-      const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(html)
-      await printWin.loadURL(dataUrl)
-      await new Promise<void>((resolve, reject) => {
-        printWin.webContents.print(
-          {
-            silent: !!payload?.deviceName,
-            deviceName: payload?.deviceName,
-            printBackground: true,
-            margins: { marginType: 'none' }
-          },
-          (success, failureReason) => {
-            if (success) resolve()
-            else reject(new Error(failureReason || 'PRINT_CANCELLED'))
-          }
-        )
-      })
-      return { ok: true }
-    } catch (e) {
-      return { ok: false, error: (e as Error).message }
-    } finally {
-      if (!printWin.isDestroyed()) printWin.close()
-    }
-  })
+  registerPrintingIpc(ipcMain, BrowserWindow)
 
   // Override CSP from the main process so LAN HTTP requests to the branch server are allowed.
   // The HTML meta-tag CSP cannot reliably wildcard arbitrary IPs in Chromium.

@@ -111,6 +111,7 @@ const api = {
 const INVOKE_CHANNELS = [
   'get-mac-address',
   'print-receipt',
+  'printer:list',
   'tls:pin',
   'tls:pinned',
   'tls:unpin',
