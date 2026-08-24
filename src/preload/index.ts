@@ -106,7 +106,14 @@ const api = {
  * this list explicit means a script that got in could still only call things
  * we chose to expose.
  */
-const INVOKE_CHANNELS = ['get-mac-address', 'print-receipt'] as const
+const INVOKE_CHANNELS = [
+  'get-mac-address',
+  'print-receipt',
+  'tls:pin',
+  'tls:pinned',
+  'tls:unpin',
+  'tls:inspect'
+] as const
 
 const electronStub = {
   ipcRenderer: {

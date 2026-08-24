@@ -28,6 +28,14 @@ import {
 } from './db'
 import type { SyncEventInput } from './db'
 import { appendFileSync } from 'fs'
+import tls from 'tls'
+import {
+  getPinnedFingerprint,
+  setPinnedFingerprint,
+  clearPinnedFingerprint,
+  fingerprintsMatch,
+  fingerprintOfPem
+} from './pinnedCert'
 
 function getMacAddress(): string {
   const interfaces = os.networkInterfaces()
@@ -106,6 +114,31 @@ function createWindow(): void {
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
+/**
+ * Accept the branch server's certificate, and only that one.
+ *
+ * The server issues its own — there is no certificate authority in a shop —
+ * so Chromium refuses it by default. The till was told the fingerprint at
+ * pairing, and this is where that promise is kept: exactly that certificate,
+ * on the LAN, and nothing else. An unpaired till pins nothing and so trusts
+ * nothing, which is the right way round.
+ */
+app.on('certificate-error', (event, _webContents, url, _error, certificate, callback) => {
+  const pinned = getPinnedFingerprint(app.getPath('userData'))
+  const presented = fingerprintOfPem(certificate.data)
+  if (pinned && presented && fingerprintsMatch(presented, pinned)) {
+    event.preventDefault()
+    callback(true)
+    return
+  }
+  // Say which it was. "Could not connect" sends a shop hunting the network
+  // when the answer is that this till is pointed at a different machine.
+  console.error(
+    `[tls] refusing ${url} — ${pinned ? 'certificate does not match the one pinned at pairing' : 'this terminal has not been paired'}`
+  )
+  callback(false)
+})
+
 app.whenReady().then(() => {
   // Set app user model id for windows
   app.setAppUserModelId('com.cashlio.terminal')
@@ -115,6 +148,64 @@ app.whenReady().then(() => {
 
   // Expose real MAC address to renderer securely via IPC
   ipcMain.handle('get-mac-address', () => getMacAddress())
+
+  // Pairing hands the till the branch server's certificate fingerprint. It is
+  // written here, in the main process, because the check that uses it runs
+  // here — a value the page could rewrite would not be a pin at all.
+  ipcMain.handle('tls:pin', (_e, fingerprint: string) => {
+    const ok = setPinnedFingerprint(app.getPath('userData'), String(fingerprint ?? ''))
+    return { ok }
+  })
+  ipcMain.handle('tls:pinned', () => getPinnedFingerprint(app.getPath('userData')))
+
+  /**
+   * Look at what a branch server is presenting, without trusting it.
+   *
+   * An unpaired till has nothing pinned, so it trusts nothing — which leaves
+   * it unable to make the very request that would get it paired. This is the
+   * way out: open the connection, read the certificate, send nothing. What
+   * comes back is shown to the manager to check against the fingerprint on
+   * the manager app before anything is pinned or any password is typed. That
+   * comparison is the security here — accepting whatever answers first would
+   * hand the shop's credentials to anything on the network that got in ahead
+   * of the real server.
+   */
+  ipcMain.handle('tls:inspect', async (_e, input: { host: string; port: number }) => {
+    return new Promise((resolve) => {
+      const socket = tls.connect(
+        {
+          host: input.host,
+          port: Number(input.port),
+          servername: input.host,
+          rejectUnauthorized: false,
+          timeout: 6000
+        },
+        () => {
+          const cert = socket.getPeerX509Certificate?.()
+          socket.destroy()
+          resolve(
+            cert
+              ? {
+                  ok: true,
+                  fingerprint: cert.fingerprint256,
+                  subject: cert.subject,
+                  validTo: cert.validTo
+                }
+              : { ok: false, error: 'NO_CERTIFICATE' }
+          )
+        }
+      )
+      socket.on('error', (e: Error) => resolve({ ok: false, error: e.message }))
+      socket.on('timeout', () => {
+        socket.destroy()
+        resolve({ ok: false, error: 'TIMEOUT' })
+      })
+    })
+  })
+  ipcMain.handle('tls:unpin', () => {
+    clearPinnedFingerprint(app.getPath('userData'))
+    return { ok: true }
+  })
 
   // ─── Local SQLite ───────────────────────────────────────────────────────
   // Open the DB on startup so failures surface early and migrations run
@@ -252,7 +343,7 @@ app.whenReady().then(() => {
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:* http:; img-src 'self' data:"
+          "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' https: http://localhost:* ws://localhost:* ws://127.0.0.1:*; img-src 'self' data:"
         ]
       }
     })

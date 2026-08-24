@@ -186,7 +186,7 @@ function dateLabel(iso: string | null | undefined): string {
 export default function ReturnsScreen(): React.JSX.Element {
   const ip = localStorage.getItem('mainServerIp') || ''
   const port = localStorage.getItem('mainServerPort') || '52001'
-  const apiBase = `http://${ip}:${port}`
+  const apiBase = `https://${ip}:${port}`
   const token = localStorage.getItem('cashierToken')
   const deviceId = localStorage.getItem('terminalDeviceId') || ''
 

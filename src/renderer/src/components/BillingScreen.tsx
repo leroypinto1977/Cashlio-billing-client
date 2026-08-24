@@ -250,7 +250,7 @@ function offlineCreditAllowed(check: CreditCheck): boolean {
 export default function BillingScreen({ onPendingCountChange }: { onPendingCountChange?: (n: number) => void } = {}) {
   const ip = localStorage.getItem('mainServerIp') || ''
   const port = localStorage.getItem('mainServerPort') || '52001'
-  const apiBase = `http://${ip}:${port}`
+  const apiBase = `https://${ip}:${port}`
   const token = localStorage.getItem('cashierToken')
   const deviceId = localStorage.getItem('terminalDeviceId') || ''
   // Phase 3D: present if the terminal has been (re-)paired post-3D. Empty for

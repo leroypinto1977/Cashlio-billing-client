@@ -22,7 +22,7 @@ export default function Login() {
     if (!ip) {
       navigate('/') // Redirect to setup if no IP is saved
     } else {
-      setServerAddress(`http://${ip}:${port}`)
+      setServerAddress(`https://${ip}:${port}`)
     }
   }, [navigate])
 

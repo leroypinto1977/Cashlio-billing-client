@@ -20,6 +20,9 @@ export default function Setup() {
   // never written down.
   const [adminUser, setAdminUser] = useState('')
   const [adminPass, setAdminPass] = useState('')
+  // The certificate this server is offering, shown to the manager to check
+  // against the manager app before anything is pinned or any password sent.
+  const [offered, setOffered] = useState<{ fingerprint: string; validTo: string } | null>(null)
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const navigate = useNavigate()
@@ -42,9 +45,43 @@ export default function Setup() {
     setStatus('loading')
     setErrorMessage('')
 
+    // Look at the server's certificate first. Until the manager confirms it,
+    // nothing is pinned and no password leaves this machine — otherwise a
+    // laptop on the shop's Wi-Fi answering in the server's place would be
+    // handed the credentials that authorise a new till.
+    if (!offered) {
+      const seen = (await window.electron.ipcRenderer.invoke('tls:inspect', {
+        host: ipAddress,
+        port: Number(port)
+      })) as { ok: boolean; fingerprint?: string; validTo?: string; error?: string }
+      if (!seen.ok || !seen.fingerprint) {
+        setStatus('error')
+        setErrorMessage(
+          seen.error === 'TIMEOUT'
+            ? 'No answer from that address. Check the IP and that the manager app is running.'
+            : `Could not read the server's certificate (${seen.error ?? 'unknown error'}).`
+        )
+        return
+      }
+      setOffered({ fingerprint: seen.fingerprint, validTo: seen.validTo ?? '' })
+      setStatus('idle')
+      return
+    }
+
     try {
       const macAddress = (await window.electron.ipcRenderer.invoke('get-mac-address')) as string
-      const serverUrl = `http://${ipAddress}:${port}`
+      const serverUrl = `https://${ipAddress}:${port}`
+
+      // Confirmed — trust this certificate and nothing else from here on.
+      const pinned = (await window.electron.ipcRenderer.invoke(
+        'tls:pin',
+        offered.fingerprint
+      )) as { ok: boolean }
+      if (!pinned.ok) {
+        setStatus('error')
+        setErrorMessage('That certificate fingerprint could not be stored. Try again.')
+        return
+      }
 
       const auth = await axios.post(`${serverUrl}/api/v1/auth/login`, {
         username: adminUser,
@@ -70,6 +107,22 @@ export default function Setup() {
         if (response.data.terminalCode) {
           localStorage.setItem('terminalCode', response.data.terminalCode)
         }
+        // The server states its own fingerprint over the connection we just
+        // verified. If it disagrees with what we inspected, something sat in
+        // between — refuse rather than paper over it.
+        if (response.data.certFingerprint && offered) {
+          const a = String(response.data.certFingerprint).replace(/[^0-9a-fA-F]/g, '').toUpperCase()
+          const b = offered.fingerprint.replace(/[^0-9a-fA-F]/g, '').toUpperCase()
+          if (a !== b) {
+            await window.electron.ipcRenderer.invoke('tls:unpin')
+            setStatus('error')
+            setErrorMessage(
+              'The server reported a different certificate from the one it presented. ' +
+                'Do not continue — tell whoever runs the network.'
+            )
+            return undefined
+          }
+        }
 
         setTimeout(() => {
           navigate('/login')
@@ -78,6 +131,8 @@ export default function Setup() {
       return undefined
     } catch (error: any) {
       console.error('Connection failed:', error)
+      // A half-paired till holding a pin it never used is confusing to debug.
+      await window.electron.ipcRenderer.invoke('tls:unpin').catch(() => undefined)
       setStatus('error')
       const code = error.response?.data?.error
       setErrorMessage(
@@ -210,6 +265,34 @@ export default function Setup() {
                 </p>
               </div>
 
+            {offered && status !== 'success' && (
+              <div className="rounded-md border border-amber-200 bg-amber-50 p-3 space-y-2">
+                <p className="text-sm font-semibold text-amber-900">
+                  Check this matches the manager app
+                </p>
+                <p className="font-mono text-xs leading-relaxed text-amber-900 break-all">
+                  {offered.fingerprint}
+                </p>
+                <p className="text-xs text-amber-800">
+                  Open <span className="font-medium">Settings → Devices</span> on the manager app
+                  and compare. If it does not match, stop — something else on the network is
+                  answering. Continuing pins this certificate and this terminal will talk to
+                  nothing else.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOffered(null)
+                    setStatus('idle')
+                    setErrorMessage('')
+                  }}
+                  className="text-xs font-medium text-amber-900 underline underline-offset-2"
+                >
+                  It doesn't match — start over
+                </button>
+              </div>
+            )}
+
             {status === 'error' && (
               <Alert
                 variant="destructive"
@@ -241,12 +324,14 @@ export default function Setup() {
               {status === 'loading' ? (
                 <>
                   <Settings className="animate-spin mr-2 h-4 w-4" />
-                  Connecting...
+                  {offered ? 'Pairing…' : 'Checking the server…'}
                 </>
               ) : status === 'success' ? (
                 'Paired Successfully'
+              ) : offered ? (
+                'It matches — pair this terminal'
               ) : (
-                'Pair with Server'
+                'Check the server'
               )}
             </Button>
           </CardFooter>
