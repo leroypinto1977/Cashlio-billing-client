@@ -8,6 +8,7 @@ import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Modal } from './ui/modal'
 import { printReceipt, type ReceiptBill, type ReceiptShop } from '../lib/receipt'
+import { useBillingShortcuts, useFocusAndSelect, ShortcutBar } from '../lib/billingShortcuts'
 import { computeInvoiceTotals } from '@shared/money'
 import { stateCodeOf } from '@shared/validation'
 import { validateName, validateMobile } from '@shared/validation'
@@ -275,6 +276,11 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
 
   // Cart
   const [cartItems, setCartItems] = useState<CartItem[]>([])
+  /** The line the keyboard acts on. -1 means the last one, which is what a
+   *  cashier almost always means: the thing just scanned. */
+  const [selectedLine, setSelectedLine] = useState(-1)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const tenderAmountRef = useRef<HTMLInputElement>(null)
 
   // Search
   const [search, setSearch] = useState('')
@@ -1140,6 +1146,34 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
 
   // Auto-print when a bill lands successfully (online or offline)
   const autoPrintFiredFor = useRef<string | null>(null)
+  const focusSearch = useFocusAndSelect(searchInputRef)
+  const focusAmount = useFocusAndSelect(tenderAmountRef)
+
+  useBillingShortcuts({
+    modalOpen: showCustomerModal || !!successBill,
+    pendingProduct: !!pendingProduct,
+    dropdownOpen: showDropdown,
+    lineCount: cartItems.length,
+    selectedLine,
+    setSelectedLine,
+    focusSearch,
+    focusAmount,
+    cancelPending: () => setPendingProduct(null),
+    closeDropdown: () => setShowDropdown(false),
+    openCustomer: () => setShowCustomerModal(true),
+    stepQuantity: (idx, dir) => updateQty(idx, dir),
+    removeLine: removeItem,
+    collect: () => void handlePay(),
+    canCollect: canPay && !submitting && cartItems.length > 0
+  })
+
+  // A line removed elsewhere must not leave the selection pointing past the end.
+  useEffect(() => {
+    if (selectedLine >= cartItems.length) setSelectedLine(-1)
+  }, [cartItems.length, selectedLine])
+
+  const activeLine = selectedLine < 0 ? cartItems.length - 1 : selectedLine
+
   useEffect(() => {
     if (!successBill) { autoPrintFiredFor.current = null; return }
     if (!autoPrint) return
@@ -1298,6 +1332,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground z-10" />
               <Input
                 value={search}
+                ref={searchInputRef}
                 onChange={(e) => { setSearch(e.target.value); setPendingProduct(null) }}
                 onFocus={() => search && setShowDropdown(true)}
                 onKeyDown={(e) => {
@@ -1436,7 +1471,15 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                 </thead>
                 <tbody className="divide-y">
                   {cartItems.map((it, idx) => (
-                    <tr key={it.productId + idx} className="hover:bg-zinc-50/60 group">
+                    <tr
+                      key={it.productId + idx}
+                      onClick={() => setSelectedLine(idx)}
+                      className={`group cursor-default ${
+                        idx === activeLine
+                          ? 'bg-zinc-100 ring-1 ring-inset ring-zinc-300'
+                          : 'hover:bg-zinc-50/60'
+                      }`}
+                    >
                       <td className="px-3 py-2.5 text-muted-foreground text-xs">{idx + 1}</td>
                       <td className="px-3 py-2.5">
                         <p className="font-medium text-zinc-900 text-sm">{it.productName}</p>
@@ -1540,6 +1583,8 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
               </table>
             </div>
           )}
+
+          <ShortcutBar hasLines={cartItems.length > 0} />
         </div>
 
         {/* RIGHT PANEL */}
@@ -1643,6 +1688,7 @@ export default function BillingScreen({ onPendingCountChange }: { onPendingCount
                     <div className="relative flex-1">
                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground font-medium">₹</span>
                       <Input
+                        ref={idx === 0 ? tenderAmountRef : undefined}
                         type="number"
                         min="0"
                         step="0.01"
