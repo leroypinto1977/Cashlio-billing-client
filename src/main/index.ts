@@ -18,6 +18,7 @@ import {
   getProductCacheUpdatedAt,
   searchProducts,
   getProductByItemCode,
+  getProductByBarcode,
   countProductMirror,
   searchCustomers,
   applySyncEvents,
@@ -274,6 +275,9 @@ app.whenReady().then(() => {
   )
   ipcMain.handle('db:mirror:product-by-item-code', (_e, itemCode: string) =>
     getProductByItemCode(itemCode)
+  )
+  ipcMain.handle('db:mirror:product-by-barcode', (_e, code: string) =>
+    getProductByBarcode(code)
   )
   ipcMain.handle('db:mirror:product-count', () => countProductMirror())
   ipcMain.handle(
