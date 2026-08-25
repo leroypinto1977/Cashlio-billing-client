@@ -151,6 +151,23 @@ function migrate(d: Database.Database): void {
     `)
     d.prepare('INSERT INTO schema_version (version) VALUES (?)').run(3)
   }
+
+  if (current < 4) {
+    // Barcodes, so the scanner works when the link to the branch server is
+    // down. No backfill: barcodes are new, so no product has one yet, and the
+    // act of giving a product its first code emits the sync event that brings
+    // it here.
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS product_barcodes (
+        code       TEXT PRIMARY KEY,
+        product_id TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_product_barcodes_product ON product_barcodes(product_id);
+    `)
+    d.prepare('INSERT INTO schema_version (version) VALUES (?)').run(4)
+  }
 }
 
 // ─── Pending bills ──────────────────────────────────────────────────────────
@@ -374,16 +391,42 @@ type ProductMirrorRow = {
 export function searchProducts(query: string, limit = 20): unknown[] {
   const d = getDb()
   const q = `%${query.toLowerCase()}%`
+  // A barcode matches whole or not at all: half of a thirteen-digit number
+  // matching something is a coincidence, not a result.
+  const code = query.trim().toUpperCase()
   const rows = d
     .prepare(
       `SELECT payload_json, sell_mode, total_stock FROM products
         WHERE is_active = 1
-          AND (LOWER(name) LIKE ? OR LOWER(item_code) LIKE ?)
+          AND (LOWER(name) LIKE ? OR LOWER(item_code) LIKE ?
+               OR id IN (SELECT product_id FROM product_barcodes WHERE code = ?))
         ORDER BY name ASC
         LIMIT ?`
     )
-    .all(q, q, limit) as ProductMirrorRow[]
+    .all(q, q, code, limit) as ProductMirrorRow[]
   return rows.map((r) => hydrateProduct(safeParse(r.payload_json), r))
+}
+
+/**
+ * What a scanner just read, from the mirror.
+ *
+ * The till has to keep selling when the branch server is unreachable, so the
+ * scan is answered locally rather than over the link. Returns null both for a
+ * code nobody carries and for one on a discontinued product — either way there
+ * is nothing to put in the cart.
+ */
+export function getProductByBarcode(code: string): unknown | null {
+  const d = getDb()
+  const r = d
+    .prepare(
+      `SELECT p.payload_json, p.sell_mode, p.total_stock
+         FROM product_barcodes b
+         JOIN products p ON p.id = b.product_id
+        WHERE b.code = ? AND p.is_active = 1
+        LIMIT 1`
+    )
+    .get(String(code ?? '').trim().toUpperCase()) as ProductMirrorRow | undefined
+  return r ? hydrateProduct(safeParse(r.payload_json), r) : null
 }
 
 export function getProductByItemCode(itemCode: string): unknown | null {
@@ -472,6 +515,14 @@ export function applySyncEvents(events: SyncEventInput[]): {
        updated_at = excluded.updated_at`
   )
   const deleteProduct = d.prepare(`DELETE FROM products WHERE id = ?`)
+  // The code set is replaced wholesale on every upsert, so a code moved to
+  // another product or taken off one does not linger here and keep scanning
+  // to something the branch server no longer agrees with.
+  const clearBarcodes = d.prepare(`DELETE FROM product_barcodes WHERE product_id = ?`)
+  const releaseBarcode = d.prepare(`DELETE FROM product_barcodes WHERE code = ?`)
+  const addBarcode = d.prepare(
+    `INSERT INTO product_barcodes (code, product_id, updated_at) VALUES (?, ?, ?)`
+  )
   const upsertCustomer = d.prepare(
     `INSERT INTO customers (id, name, phone, is_active, payload_json, updated_at)
      VALUES (@id, @name, @phone, @isActive, @payload, @ts)
@@ -504,6 +555,7 @@ export function applySyncEvents(events: SyncEventInput[]): {
       try {
         if (ev.entity === 'product') {
           if (ev.op === 'delete') {
+            clearBarcodes.run(ev.entityId)
             deleteProduct.run(ev.entityId)
           } else {
             const p = (ev.payload ?? {}) as Record<string, unknown>
@@ -519,6 +571,18 @@ export function applySyncEvents(events: SyncEventInput[]): {
               payload: JSON.stringify(p),
               ts: Date.now()
             })
+            clearBarcodes.run(ev.entityId)
+            const codes = Array.isArray(p.barcodes) ? p.barcodes : []
+            for (const raw of codes) {
+              const code = asString(raw)?.trim().toUpperCase()
+              if (!code) continue
+              // A code that has just moved to this product is still recorded
+              // against the old one until its own upsert arrives, which may be
+              // later in this same batch. Freeing it first keeps the primary
+              // key from rejecting the row and stalling the whole sync.
+              releaseBarcode.run(code)
+              addBarcode.run(code, ev.entityId, Date.now())
+            }
           }
         } else if (ev.entity === 'customer') {
           if (ev.op === 'delete') {

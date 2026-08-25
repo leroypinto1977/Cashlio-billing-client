@@ -57,7 +57,7 @@ function eq(name, actual, expected) {
 
 function reset() {
   const d = db.getDb()
-  for (const tbl of ['pending_bills', 'products', 'customers', 'bills_seen', 'product_cache', 'sync_state']) {
+  for (const tbl of ['pending_bills', 'products', 'customers', 'bills_seen', 'product_cache', 'sync_state', 'product_barcodes']) {
     try {
       d.exec(`DELETE FROM ${tbl}`)
     } catch {
@@ -238,6 +238,56 @@ console.log('\n— sync cursor —')
   eq('a cursor round-trips', db.getSyncState('pull_cursor'), '42')
   db.setSyncState('pull_cursor', '43')
   eq('a cursor overwrites', db.getSyncState('pull_cursor'), '43')
+}
+
+console.log('\n— scanning, with the branch server unreachable —')
+{
+  reset()
+  const upsert = (id, itemCode, name, barcodes, isActive = true) => ({
+    id: String(id), entity: 'product', entityId: `p-${itemCode}`, op: 'upsert',
+    payload: { itemCode, name, barcodes, isActive, sellMode: 'UNIT', totalStock: 10 }
+  })
+
+  db.applySyncEvents([
+    upsert(1, 'LAMP-9W', 'LED Lamp 9W', ['8901058000108', '4006381333931']),
+    upsert(2, 'SW-6A', 'Anchor 6A Switch', ['96385074']),
+    upsert(3, 'NOCODE', 'Unbarcoded Item', [])
+  ])
+
+  t('a scan finds its product', db.getProductByBarcode('8901058000108')?.itemCode === 'LAMP-9W')
+  t('a second code finds the same one', db.getProductByBarcode('4006381333931')?.itemCode === 'LAMP-9W')
+  t('another product keeps its own', db.getProductByBarcode('96385074')?.itemCode === 'SW-6A')
+  eq('an unknown code finds nothing', db.getProductByBarcode('0000000000000'), null)
+  // Shop codes are stored uppercased, so a lowercase scan has to find them.
+  db.applySyncEvents([upsert(9, 'LOOSE-WIRE', 'Loose Wire', ['LOOSE-WIRE-RED'])])
+  t('a shop code scans', db.getProductByBarcode('LOOSE-WIRE-RED')?.itemCode === 'LOOSE-WIRE')
+  t('...and does so case-insensitively',
+    db.getProductByBarcode('loose-wire-red')?.itemCode === 'LOOSE-WIRE')
+
+  // Codes travel in the product payload, so a change upstream replaces the set.
+  db.applySyncEvents([upsert(4, 'LAMP-9W', 'LED Lamp 9W', ['4006381333931'])])
+  eq('a code taken off the product stops scanning', db.getProductByBarcode('8901058000108'), null)
+  t('the remaining one still works', db.getProductByBarcode('4006381333931')?.itemCode === 'LAMP-9W')
+
+  // A code moving between products must not wedge the sync on its primary key.
+  const moved = db.applySyncEvents([upsert(5, 'SW-6A', 'Anchor 6A Switch', ['96385074', '4006381333931'])])
+  eq('a code moving to another product applies cleanly', moved.applied, 1)
+  eq('...with nothing stuck', moved.stoppedAt, null)
+  t('and it now finds the new product', db.getProductByBarcode('4006381333931')?.itemCode === 'SW-6A')
+
+  // Discontinued goods must not be scannable into a cart.
+  db.applySyncEvents([upsert(6, 'SW-6A', 'Anchor 6A Switch', ['96385074'], false)])
+  eq('a discontinued product does not scan', db.getProductByBarcode('96385074'), null)
+
+  db.applySyncEvents([{ id: '7', entity: 'product', entityId: 'p-LAMP-9W', op: 'delete' }])
+  eq('deleting a product takes its codes with it', db.getProductByBarcode('4006381333931'), null)
+
+  // Search has to find a whole barcode, and only a whole one.
+  db.applySyncEvents([upsert(8, 'MCB-32', 'Havells 32A MCB', ['5901234123457'])])
+  eq('a full code searches to one product', db.searchProducts('5901234123457').length, 1)
+  eq('half a code matches nothing', db.searchProducts('590123').length, 0)
+  eq('a name still searches', db.searchProducts('havells').length, 1)
+  eq('lowercase scans the same', db.searchProducts('5901234123457').length, 1)
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

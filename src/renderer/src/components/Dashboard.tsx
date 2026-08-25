@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ShoppingCart, LogOut, Monitor, Wifi, WifiOff, Clock, AlertCircle, RotateCcw } from 'lucide-react'
+import { ShoppingCart, LogOut, Monitor, Wifi, WifiOff, Clock, AlertCircle, RotateCcw, Printer } from 'lucide-react'
 import { Button } from './ui/button'
 import BillingScreen from './BillingScreen'
 import ReturnsScreen from './ReturnsScreen'
+import { ReceiptPrinterSettings } from './ReceiptPrinterSettings'
 
-type Tab = 'billing' | 'returns'
+type Tab = 'billing' | 'returns' | 'printer'
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -80,6 +81,17 @@ export default function Dashboard() {
             >
               <RotateCcw className="w-4 h-4" /> Returns
             </button>
+            <button
+              type="button"
+              onClick={() => setTab('printer')}
+              className={`flex items-center gap-2 h-10 px-5 rounded-lg text-sm font-semibold transition-colors ${
+                tab === 'printer'
+                  ? 'bg-white text-zinc-900 shadow-sm'
+                  : 'text-zinc-500 hover:text-zinc-800'
+              }`}
+            >
+              <Printer className="w-4 h-4" /> Printer
+            </button>
           </div>
         </div>
 
@@ -137,6 +149,11 @@ export default function Dashboard() {
           <BillingScreen onPendingCountChange={setPendingBills} />
         </div>
         {tab === 'returns' && <ReturnsScreen />}
+        {tab === 'printer' && (
+          <div className="max-w-xl mx-auto w-full py-8 px-6">
+            <ReceiptPrinterSettings />
+          </div>
+        )}
       </main>
     </div>
   )

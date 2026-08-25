@@ -65,6 +65,8 @@ const db = {
       ipcRenderer.invoke('db:mirror:product-search', { query, limit }) as Promise<unknown[]>,
     productByItemCode: (itemCode: string) =>
       ipcRenderer.invoke('db:mirror:product-by-item-code', itemCode) as Promise<unknown | null>,
+    productByBarcode: (code: string) =>
+      ipcRenderer.invoke('db:mirror:product-by-barcode', code) as Promise<unknown | null>,
     productCount: () =>
       ipcRenderer.invoke('db:mirror:product-count') as Promise<number>,
     customerSearch: (query: string, limit?: number) =>
@@ -109,6 +111,7 @@ const api = {
 const INVOKE_CHANNELS = [
   'get-mac-address',
   'print-receipt',
+  'printer:list',
   'tls:pin',
   'tls:pinned',
   'tls:unpin',

@@ -46,6 +46,7 @@ export type CashlioApi = {
     mirror: {
       productSearch: (query: string, limit?: number) => Promise<unknown[]>
       productByItemCode: (itemCode: string) => Promise<unknown | null>
+      productByBarcode: (code: string) => Promise<unknown | null>
       productCount: () => Promise<number>
       customerSearch: (query: string, limit?: number) => Promise<unknown[]>
     }
