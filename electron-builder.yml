@@ -13,6 +13,13 @@ asarUnpack:
   - resources/**
 win:
   executableName: billing-client
+  # x64 explicitly. electron-builder otherwise targets the machine doing the
+  # building, and an Apple Silicon Mac produces an arm64 installer that will
+  # not run on a shop counter.
+  target:
+    - target: nsis
+      arch:
+        - x64
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
