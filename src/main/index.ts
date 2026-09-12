@@ -85,9 +85,24 @@ function createWindow(): void {
     }
   })
 
-  mainWindow.on('ready-to-show', () => {
+  // Show on whichever of these arrives first.
+  //
+  // 'ready-to-show' is the documented signal and usually the right one, but
+  // under Electron 39 it did not fire at all for the manager's window: the
+  // window existed, the renderer loaded and ran, and nothing was ever put on
+  // screen — an app that looks exactly as though it failed to start. The same
+  // pattern was here. A till nobody can see is a till nobody can bill on.
+  let shown = false
+  const reveal = (why: string): void => {
+    if (shown || mainWindow.isDestroyed()) return
+    shown = true
     mainWindow.show()
-  })
+    console.log(`[window] shown (${why})`)
+  }
+  mainWindow.on('ready-to-show', () => reveal('ready-to-show'))
+  mainWindow.webContents.on('did-finish-load', () => reveal('did-finish-load'))
+  const failsafe = setTimeout(() => reveal('failsafe timer'), 10_000)
+  mainWindow.on('closed', () => clearTimeout(failsafe))
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     // Only hand real web links to the OS. Unfiltered, this would open
