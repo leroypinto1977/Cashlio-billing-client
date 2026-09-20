@@ -156,7 +156,40 @@ app.on('certificate-error', (event, _webContents, url, _error, certificate, call
   callback(false)
 })
 
+/**
+ * One till per machine.
+ *
+ * Everything this terminal owns lives in one SQLite database: the outbox of
+ * bills not yet sent, the product mirror, the sync cursor, and the counter
+ * that mints this terminal's bill numbers. A second copy of the app is a
+ * second writer to all of it — two sync workers draining the same outbox on
+ * the same thirty-second tick, two processes contending for the write lock
+ * that hands out the next bill number. The server's idempotency keys catch
+ * the duplicates that reach it, but a cashier should not be relying on that,
+ * and should not be looking at two tills wondering which one is the real one.
+ *
+ * So the second copy steps aside and brings forward the window already open,
+ * which is what someone who double-clicked the shortcut wanted anyway.
+ */
+const isPrimaryInstance = app.requestSingleInstanceLock()
+if (!isPrimaryInstance) {
+  console.log('[app] this till is already open — handing over to it')
+  app.quit()
+}
+
+app.on('second-instance', () => {
+  const [existing] = BrowserWindow.getAllWindows()
+  if (!existing) return
+  if (existing.isMinimized()) existing.restore()
+  existing.show()
+  existing.focus()
+})
+
 app.whenReady().then(() => {
+  // The lock was lost above: this copy is on its way out and must not open the
+  // database on the way.
+  if (!isPrimaryInstance) return
+
   // Set app user model id for windows
   app.setAppUserModelId('com.cashlio.terminal')
 
